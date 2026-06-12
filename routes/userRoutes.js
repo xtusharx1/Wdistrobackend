@@ -1,51 +1,72 @@
 const express = require('express');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+
 const router = express.Router();
 
-// Get all users (admin list)
+// Create user
+router.post('/', async (req, res) => {
+  const { name, email, password, role, phone } = req.body;
+  if (!name || !email || !password || !role) {
+    return res.status(400).json({ success: false, message: 'All fields are required' });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await User.create({ name, email, password: hashedPassword, role, phone: phone || null });
+    return res.status(201).json({ success: true, message: 'User created successfully', data: { user } });
+  } catch (err) {
+    console.error('Error creating user:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Get users
 router.get('/', async (req, res) => {
   try {
-    const users = await User.findAll({ attributes: { exclude: ['password'] } });
-    res.json({ success: true, users });
+    const users = await User.findAll();
+    return res.json({ success: true, message: 'Users fetched successfully', data: { users } });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('Error fetching users:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
-// Get single user by ID
-router.get('/:id', async (req, res) => {
+// Approve / Activate user
+router.patch('/:id/approve', async (req, res) => {
   const { id } = req.params;
-  if (!id || isNaN(Number(id))) {
-    return res.status(400).json({ success: false, message: 'Valid user id required' });
-  }
-  try {
-    const user = await User.findByPk(id, { attributes: { exclude: ['password'] } });
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    res.json({ success: true, user });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
 
-// Update user
-router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  if (!id || isNaN(Number(id))) {
-    return res.status(400).json({ success: false, message: 'Valid user id required' });
-  }
   try {
     const user = await User.findByPk(id);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    // Only allow updating certain fields
-    const allowedFields = ['name', 'email', 'role', 'status'];
-    const updates = {};
-    for (const key of allowedFields) {
-      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
-    await user.update(updates);
-    res.json({ success: true, user });
+
+    user.is_active = true;
+    await user.save();
+    return res.json({ success: true, message: 'User activated successfully', data: { user } });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('Error activating user:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Reject / Deactivate user
+router.patch('/:id/reject', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const user = await User.findByPk(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    user.is_active = false;
+    await user.save();
+    return res.json({ success: true, message: 'User deactivated successfully', data: { user } });
+  } catch (err) {
+    console.error('Error deactivating user:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 

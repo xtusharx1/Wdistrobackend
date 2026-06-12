@@ -1,0 +1,21 @@
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/db');
+const Order = require('./Order');
+
+const Invoice = sequelize.define('Invoice', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  order_id: {
+    type: DataTypes.INTEGER,
+    references: {
+      model: Order,
+      key: 'id'
+    },
+    allowNull: false
+  },
+  final_amount: { type: DataTypes.FLOAT, allowNull: false },
+  generated_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, allowNull: false }
+}, {
+  timestamps: false
+});
+
+module.exports = Invoice;

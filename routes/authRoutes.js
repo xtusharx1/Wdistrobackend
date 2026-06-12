@@ -1,134 +1,186 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+const Shop = require('../models/Shop');
+const sequelize = require('../config/db');
 
 const router = express.Router();
 
 // Basic helpers
 const sanitizeUser = (user) => ({ id: user.id, name: user.name, email: user.email });
 
-router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body || {};
-  if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
-  if (typeof password !== 'string' || password.length < 6) return res.status(400).json({ error: 'password must be at least 6 characters' });
-
-  try {
-    const hash = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, password: hash });
-    return res.status(201).json({ success: true, user: sanitizeUser(user) });
-  } catch (err) {
-    // handle unique constraint more clearly
-    if (err.name === 'SequelizeUniqueConstraintError') {
-      return res.status(409).json({ success: false, message: 'Email already in use' });
-    }
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
+// Login route
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: 'Email and password are required' });
+  }
 
   try {
     const user = await User.findOne({ where: { email } });
-    if (!user) return res.status(400).json({ success: false, message: 'Invalid email or password' });
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
 
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ success: false, message: 'Invalid email or password' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
 
-    return res.json({ success: true, user: sanitizeUser(user) });
+    // Check approval status for Buyers
+    if (user.role === 'Buyer') {
+      if (user.approval_status === 'Pending') {
+        return res.status(403).json({ success: false, message: 'Your shop registration is pending admin approval.' });
+      }
+      if (user.approval_status === 'Rejected') {
+        return res.status(403).json({ success: false, message: 'Your shop registration was rejected by the admin.' });
+      }
+    }
+
+    return res.json({ success: true, message: 'Login successful', data: { user: sanitizeUser(user) } });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    console.error('Login error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
-router.put('/user/:id', async (req, res) => {
-  const { id } = req.params;
-  const { name, email, currentPassword, newPassword } = req.body;
+// Logout route
+router.post('/logout', (req, res) => {
+  return res.json({ success: true, message: 'Logged out successfully', data: null });
+});
+
+// Register/Signup route
+router.post('/register', async (req, res) => {
+  const {
+    ownerName,
+    email,
+    phone,
+    password,
+    shopName,
+    address,
+    city,
+    state,
+    zip,
+    sellerPermit,
+    tobaccoLicense
+  } = req.body;
+
+  if (!ownerName || !email || !password || !shopName || !sellerPermit) {
+    return res.status(400).json({ success: false, message: 'Owner name, email, password, shop name, and seller permit number are required' });
+  }
+
+  const transaction = await sequelize.transaction();
 
   try {
-    const user = await User.findByPk(id);
+    // Check if user already exists
+    const existingUser = await User.findOne({ where: { email }, transaction });
+    if (existingUser) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'User with this email already exists' });
+    }
+
+    // Check if shop already exists
+    const existingShop = await Shop.findOne({ where: { seller_permit: sellerPermit }, transaction });
+    if (existingShop) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Shop with this Seller Permit Number already exists' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create User
+    const user = await User.create({
+      name: ownerName,
+      email,
+      phone,
+      password: hashedPassword,
+      role: 'Buyer',
+      approval_status: 'Pending'
+    }, { transaction });
+
+    // Create Shop
+    const shop = await Shop.create({
+      shop_name: shopName,
+      seller_permit: sellerPermit,
+      tobacco_license: tobaccoLicense || null,
+      contact_details: phone || '',
+      address: address || '',
+      city: city || '',
+      state: state || '',
+      zip: zip || '',
+      user_id: user.id
+    }, { transaction });
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Registration request submitted successfully',
+      data: {
+        user: sanitizeUser(user),
+        shop
+      }
+    });
+  } catch (err) {
+    await transaction.rollback();
+    console.error('Registration error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Change Password route
+router.post('/change-password', async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+
+  if (!email || !currentPassword || !newPassword) {
+    return res.status(400).json({ success: false, message: 'Email, current password, and new password are required' });
+  }
+
+  try {
+    const user = await User.findOne({ where: { email } });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Always require current password for any profile changes
-    if (!currentPassword) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Current password is required to update profile' 
-      });
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid current password' });
     }
 
-    // Verify current password
-    const passwordMatch = await bcrypt.compare(currentPassword, user.password);
-    if (!passwordMatch) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Current password is incorrect' 
-      });
-    }
-
-    // Check if new email is already in use (if email is being changed)
-    if (email && email !== user.email) {
-      const existingUser = await User.findOne({ where: { email } });
-      if (existingUser) {
-        return res.status(409).json({ 
-          success: false, 
-          message: 'Email is already in use by another account' 
-        });
-      }
-    }
-
-    // Validate new password if provided
-    if (newPassword) {
-      if (newPassword.length < 6) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'New password must be at least 6 characters long' 
-        });
-      }
-      // Hash and update password
-      const hashedPassword = await bcrypt.hash(newPassword, 10);
-      user.password = hashedPassword;
-    }
-
-    // Update other fields
-    if (name && name.trim()) {
-      user.name = name.trim();
-    }
-    if (email && email.trim()) {
-      user.email = email.trim().toLowerCase();
-    }
-
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
     await user.save();
-    
-    return res.json({ 
-      success: true, 
-      message: 'Profile updated successfully',
-      user: sanitizeUser(user) 
-    });
+
+    return res.json({ success: true, message: 'Password updated successfully' });
   } catch (err) {
-    console.error('Error updating user profile:', err);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while updating your profile' 
-    });
+    console.error('Change password error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
-router.get('/user/:id', async (req, res) => {
-  const { id } = req.params;
+// Reset Password route (admin/direct password reset without current password verification)
+router.post('/reset-password', async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    return res.status(400).json({ success: false, message: 'Email and new password are required' });
+  }
 
   try {
-    const user = await User.findByPk(id);
+    const user = await User.findOne({ where: { email } });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    return res.json({ success: true, user: sanitizeUser(user) });
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    await user.save();
+
+    return res.json({ success: true, message: 'Password reset successfully' });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    console.error('Reset password error:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
