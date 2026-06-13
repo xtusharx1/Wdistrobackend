@@ -9,7 +9,7 @@ const s3 = new S3Client({
   }
 });
 
-const generateInvoicePDFBuffer = (order, shop) => {
+const generateInvoicePDFBuffer = (order, shop, shippingCharges = 0) => {
   return new Promise((resolve, reject) => {
     // US Letter page size is 612 x 792 points
     const doc = new PDFDocument({ margin: 50, size: 'LETTER' });
@@ -119,10 +119,28 @@ const generateInvoicePDFBuffer = (order, shop) => {
     doc.strokeColor('#e2e8f0').lineWidth(1).moveTo(350, position).lineTo(562, position).stroke();
     position += 10;
     
+    // Subtotal
+    doc.fillColor('#64748b').fontSize(9).font('Helvetica');
+    doc.text('Subtotal:', 350, position, { width: 100, align: 'right' });
+    doc.fillColor('#1e293b').font('Helvetica-Bold').text(`$${order.total_amount.toFixed(2)}`, 450, position, { width: 112, align: 'right' });
+    position += 15;
+
+    // Shipping Charges
+    doc.fillColor('#64748b').font('Helvetica');
+    doc.text('Shipping Charges:', 350, position, { width: 100, align: 'right' });
+    doc.fillColor('#1e293b').font('Helvetica-Bold').text(`$${shippingCharges.toFixed(2)}`, 450, position, { width: 112, align: 'right' });
+    position += 15;
+
+    // Line above Grand Total
+    doc.strokeColor('#cbd5e1').lineWidth(0.5).moveTo(350, position).lineTo(562, position).stroke();
+    position += 8;
+
+    // Grand Total
+    const grandTotal = order.total_amount + shippingCharges;
     doc.fillColor('#475569').fontSize(10).font('Helvetica-Bold');
     doc.text('Grand Total:', 350, position, { width: 100, align: 'right' });
     doc.fillColor('#002d72').fontSize(14).font('Helvetica-Bold');
-    doc.text(`$${order.total_amount.toFixed(2)}`, 450, position - 3, { width: 112, align: 'right' });
+    doc.text(`$${grandTotal.toFixed(2)}`, 450, position - 3, { width: 112, align: 'right' });
 
     // 9. Footer (at the bottom of the page)
     const footerTop = 720;
@@ -137,8 +155,8 @@ const generateInvoicePDFBuffer = (order, shop) => {
   });
 };
 
-const uploadInvoicePDF = async (order, shop) => {
-  const buffer = await generateInvoicePDFBuffer(order, shop);
+const uploadInvoicePDF = async (order, shop, shippingCharges = 0) => {
+  const buffer = await generateInvoicePDFBuffer(order, shop, shippingCharges);
   const key = `invoices/invoice-${order.id}-${Date.now()}.pdf`;
   const bucket = process.env.AWS_S3_BUCKET || 'wdistro';
   
