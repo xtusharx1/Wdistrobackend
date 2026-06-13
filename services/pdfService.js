@@ -95,8 +95,8 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     // Table Header Text
     doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
     doc.text('Product Name', 60, tableTop + 7, { width: 230 });
-    doc.text('Req Qty', 300, tableTop + 7, { width: 60, align: 'right' });
-    doc.text('App Qty', 370, tableTop + 7, { width: 60, align: 'right' });
+    doc.text('Qty', 300, tableTop + 7, { width: 60, align: 'right' });
+    doc.text('Unit', 370, tableTop + 7, { width: 60, align: 'right' });
     doc.text('Unit Price', 440, tableTop + 7, { width: 55, align: 'right' });
     doc.text('Total', 505, tableTop + 7, { width: 50, align: 'right' });
     
@@ -105,7 +105,7 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     
     (order.OrderItems || []).forEach((item, index) => {
       const name = item.Product?.name || `Product #${item.product_id}`;
-      const unit = item.Product?.unit ? ` ${item.Product.unit}` : '';
+      const unit = item.Product?.unit || '—';
       const reqQty = item.requested_qty;
       const appQty = item.approved_qty ?? reqQty;
       const price = item.price;
@@ -118,8 +118,8 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
       // Text drawing
       doc.fillColor('#1e293b');
       doc.text(name, 60, position + 7, { width: 230, ellipsis: true });
-      doc.text(`${reqQty}${unit}`, 300, position + 7, { width: 60, align: 'right' });
-      doc.text(`${appQty}${unit}`, 370, position + 7, { width: 60, align: 'right' });
+      doc.text(String(appQty), 300, position + 7, { width: 60, align: 'right' });
+      doc.text(unit, 370, position + 7, { width: 60, align: 'right' });
       doc.text(`$${price.toFixed(2)}`, 440, position + 7, { width: 55, align: 'right' });
       doc.text(`$${total.toFixed(2)}`, 505, position + 7, { width: 50, align: 'right' });
       
