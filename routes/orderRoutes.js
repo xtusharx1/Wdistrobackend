@@ -182,6 +182,7 @@ router.patch('/:id/status', async (req, res) => {
         await Invoice.create({
           order_id: order.id,
           final_amount: order.total_amount,
+          shipping_charge: 0,
           generated_at: now,
           pdf_url: pdfUrl
         });
