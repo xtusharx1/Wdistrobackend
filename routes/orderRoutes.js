@@ -35,14 +35,34 @@ router.post('/', async (req, res) => {
   }
 });
 
+const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
+
 // Get orders
 router.get('/', async (req, res) => {
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
+
   try {
+    let whereClause = {};
+    if (userRole === 'Sales Executive') {
+      const assignments = await SalesExecutiveAssignment.findAll({
+        where: { sales_exec_id: userId, end_date: null }
+      });
+      const shopIds = assignments.map(a => a.shop_id);
+      whereClause = { shop_id: shopIds };
+    }
+
     const orders = await Order.findAll({
-      include: [{
-        model: OrderItem,
-        include: [Product]
-      }],
+      where: whereClause,
+      include: [
+        {
+          model: OrderItem,
+          include: [Product]
+        },
+        {
+          model: Invoice
+        }
+      ],
       order: [['created_at', 'DESC']]
     });
     return res.json({ success: true, message: 'Orders fetched successfully', data: { orders } });
@@ -52,10 +72,28 @@ router.get('/', async (req, res) => {
   }
 });
 
+const checkSalesExecutiveAccess = async (orderId, userId, userRole) => {
+  if (userRole !== 'Sales Executive') return true;
+  const order = await Order.findByPk(orderId);
+  if (!order) return true; // Let main handler return 404
+  const assignment = await SalesExecutiveAssignment.findOne({
+    where: { sales_exec_id: userId, shop_id: order.shop_id, end_date: null }
+  });
+  return !!assignment;
+};
+
 // Get order by ID
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
+
   try {
+    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
+
     const order = await Order.findByPk(id, {
       include: [{
         model: OrderItem,
@@ -76,12 +114,19 @@ router.get('/:id', async (req, res) => {
 router.patch('/:id/process', async (req, res) => {
   const { id } = req.params;
   const { items } = req.body; // Array of { id: order_item_id, approved_qty: number }
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   if (!items || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'items array is required to process order' });
   }
 
   try {
+    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
+
     const order = await Order.findByPk(id, { include: [OrderItem] });
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
@@ -127,6 +172,8 @@ router.patch('/:id/process', async (req, res) => {
 router.patch('/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed'];
   if (!status || !validStatuses.includes(status)) {
@@ -134,6 +181,11 @@ router.patch('/:id/status', async (req, res) => {
   }
 
   try {
+    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
+
     const order = await Order.findByPk(id);
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
@@ -210,12 +262,19 @@ router.patch('/:id/status', async (req, res) => {
 router.put('/:id/approve', async (req, res) => {
   const { id } = req.params;
   const { items } = req.body; // Array of { id: order_item_id, approved_qty: number }
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   if (!items || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'items array is required to approve order' });
   }
 
   try {
+    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
+
     const order = await Order.findByPk(id, { include: [OrderItem] });
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });

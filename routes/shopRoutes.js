@@ -21,10 +21,24 @@ router.post('/', async (req, res) => {
   }
 });
 
+const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
+
 // Get shops
 router.get('/', async (req, res) => {
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
+
   try {
-    const shops = await Shop.findAll();
+    let whereClause = {};
+    if (userRole === 'Sales Executive') {
+      const assignments = await SalesExecutiveAssignment.findAll({
+        where: { sales_exec_id: userId, end_date: null }
+      });
+      const shopIds = assignments.map(a => a.shop_id);
+      whereClause = { id: shopIds };
+    }
+
+    const shops = await Shop.findAll({ where: whereClause });
     const mappedShops = shops.map(shop => {
       const s = shop.toJSON();
       s.owner_id = s.user_id;

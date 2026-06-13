@@ -6,13 +6,31 @@ const Product = require('../models/Product');
 const Shop = require('../models/Shop');
 const { uploadInvoicePDF } = require('../services/pdfService');
 
+const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
+
 const router = express.Router();
+
+const checkInvoiceSalesExecutiveAccess = async (orderId, userId, userRole) => {
+  if (userRole !== 'Sales Executive') return true;
+  const order = await Order.findByPk(orderId);
+  if (!order) return true;
+  const assignment = await SalesExecutiveAssignment.findOne({
+    where: { sales_exec_id: userId, shop_id: order.shop_id, end_date: null }
+  });
+  return !!assignment;
+};
 
 // Get invoice by order ID
 router.get('/:orderId', async (req, res) => {
   const { orderId } = req.params;
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   try {
+    const hasAccess = await checkInvoiceSalesExecutiveAccess(orderId, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
     const invoice = await Invoice.findOne({ where: { order_id: orderId }, include: [Order] });
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
@@ -29,8 +47,15 @@ router.get('/:orderId', async (req, res) => {
 router.post('/:orderId/generate', async (req, res) => {
   const { orderId } = req.params;
   const shipping_charge = parseFloat(req.body.shipping_charge || 0);
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   try {
+    const hasAccess = await checkInvoiceSalesExecutiveAccess(orderId, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    }
+
     let invoice = await Invoice.findOne({ where: { order_id: orderId }, include: [Order] });
     if (invoice && invoice.pdf_url) {
       return res.json({
@@ -94,11 +119,18 @@ router.post('/:orderId/generate', async (req, res) => {
 router.post('/:invoiceId/regenerate', async (req, res) => {
   const { invoiceId } = req.params;
   const shipping_charge = parseFloat(req.body.shipping_charge || 0);
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
 
   try {
     const invoice = await Invoice.findByPk(invoiceId, { include: [Order] });
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const hasAccess = await checkInvoiceSalesExecutiveAccess(invoice.order_id, userId, userRole);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
     }
 
     const order = await Order.findByPk(invoice.order_id, {
