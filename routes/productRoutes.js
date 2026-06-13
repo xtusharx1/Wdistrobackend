@@ -117,20 +117,26 @@ router.post('/bulk', async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page = 1, limit = 10, search } = req.query;
-    const offset = (page - 1) * limit;
+    const { page, limit, search } = req.query;
 
     const whereClause = {};
     if (search) {
       whereClause.name = { [Op.iLike]: `%${search}%` };
     }
 
-    const { count, rows: products } = await Product.findAndCountAll({
+    const options = {
       where: whereClause,
-      limit: parseInt(limit),
-      offset: parseInt(offset),
       order: [['created_at', 'DESC']]
-    });
+    };
+
+    if (limit) {
+      const pageNum = parseInt(page) || 1;
+      const limitNum = parseInt(limit);
+      options.limit = limitNum;
+      options.offset = (pageNum - 1) * limitNum;
+    }
+
+    const { count, rows: products } = await Product.findAndCountAll(options);
 
     return res.json({ 
       success: true, 
@@ -139,9 +145,9 @@ router.get('/', async (req, res) => {
         products,
         pagination: {
           total: count,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(count / limit)
+          page: limit ? parseInt(page || 1) : 1,
+          limit: limit ? parseInt(limit) : count,
+          totalPages: limit ? Math.ceil(count / limit) : 1
         }
       } 
     });
