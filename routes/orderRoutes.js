@@ -3,6 +3,8 @@ const Order = require('../models/Order');
 const OrderItem = require('../models/OrderItem');
 const Product = require('../models/Product');
 const Invoice = require('../models/Invoice');
+const Shop = require('../models/Shop');
+const { uploadInvoicePDF } = require('../services/pdfService');
 
 const router = express.Router();
 
@@ -162,13 +164,37 @@ router.patch('/:id/status', async (req, res) => {
 
     // If order is completed or delivered, automatically generate an invoice if it doesn't already exist
     if (status === 'completed' || status === 'delivered') {
-      const existingInvoice = await Invoice.findOne({ where: { order_id: order.id } });
-      if (!existingInvoice) {
+      let invoice = await Invoice.findOne({ where: { order_id: order.id } });
+      const fullOrder = await Order.findByPk(order.id, {
+        include: [{ model: OrderItem, include: [Product] }]
+      });
+      const shop = await Shop.findByPk(order.shop_id);
+
+      if (!invoice) {
+        let pdfUrl = null;
+        if (shop) {
+          try {
+            pdfUrl = await uploadInvoicePDF(fullOrder, shop);
+          } catch (pdfErr) {
+            console.error('Failed to generate/upload invoice PDF:', pdfErr);
+          }
+        }
         await Invoice.create({
           order_id: order.id,
           final_amount: order.total_amount,
-          generated_at: now
+          generated_at: now,
+          pdf_url: pdfUrl
         });
+      } else if (!invoice.pdf_url) {
+        if (shop) {
+          try {
+            const pdfUrl = await uploadInvoicePDF(fullOrder, shop);
+            invoice.pdf_url = pdfUrl;
+            await invoice.save();
+          } catch (pdfErr) {
+            console.error('Failed to generate/upload invoice PDF for existing invoice:', pdfErr);
+          }
+        }
       }
     }
 
