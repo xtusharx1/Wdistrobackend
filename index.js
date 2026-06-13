@@ -10,6 +10,7 @@ process.on('exit', (code) => {
 });
 
 const express = require('express');
+const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const sequelize = require('./config/db');
@@ -25,6 +26,7 @@ const salesRoutes = require('./routes/salesRoutes');
 
 const app = express();
 
+app.use(cors());
 app.use(express.json());
 
 // Ensure uploads directory exists and serve it statically
