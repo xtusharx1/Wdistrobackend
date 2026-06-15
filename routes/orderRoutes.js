@@ -214,8 +214,8 @@ router.patch('/:id/status', async (req, res) => {
 
     await order.save();
 
-    // If order is completed or delivered, automatically generate an invoice if it doesn't already exist
-    if (status === 'completed' || status === 'delivered') {
+    // If order is dispatched, completed or delivered, automatically generate an invoice if it doesn't already exist
+    if (status === 'dispatched' || status === 'completed' || status === 'delivered') {
       let invoice = await Invoice.findOne({ where: { order_id: order.id } });
       const fullOrder = await Order.findByPk(order.id, {
         include: [{ model: OrderItem, include: [Product] }]

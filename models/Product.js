@@ -4,6 +4,7 @@ const sequelize = require('../config/db');
 const Product = sequelize.define('Product', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   name: { type: DataTypes.STRING, allowNull: false },
+  sku_id: { type: DataTypes.STRING, allowNull: true },
   price: { type: DataTypes.FLOAT, allowNull: false },
   unit: { type: DataTypes.STRING, allowNull: false },
   category: { type: DataTypes.STRING, defaultValue: 'General', allowNull: false },

@@ -1,7 +1,9 @@
 const express = require('express');
+const { Op } = require('sequelize');
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const Shop = require('../models/Shop');
 const User = require('../models/User');
+const Order = require('../models/Order');
 
 const router = express.Router();
 
@@ -93,13 +95,74 @@ router.get('/shops', async (req, res) => {
   }
 });
 
-// Get sales executive incentives
+// Get sales executive sales performance
 router.get('/incentives', async (req, res) => {
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
+
   try {
-    const incentives = [];
-    return res.json({ success: true, message: 'Sales executive incentives fetched successfully', data: { incentives } });
+    let whereClause = {};
+    if (userRole === 'Sales Executive') {
+      whereClause = { sales_exec_id: userId };
+    } else if (req.query.sales_exec_id) {
+      whereClause = { sales_exec_id: req.query.sales_exec_id };
+    }
+
+    const assignments = await SalesExecutiveAssignment.findAll({
+      where: whereClause,
+      include: [
+        { model: User, as: 'SalesExecutive', attributes: ['id', 'name', 'email'] },
+        { model: Shop, attributes: ['id', 'shop_name'] }
+      ]
+    });
+
+    const performanceData = [];
+
+    for (const assignment of assignments) {
+      const orderWhere = {
+        shop_id: assignment.shop_id,
+        status: { [Op.ne]: 'pending' },
+        created_at: {
+          [Op.gte]: assignment.start_date
+        }
+      };
+      
+      if (assignment.end_date) {
+        orderWhere.created_at[Op.lte] = assignment.end_date;
+      }
+      
+      const orders = await Order.findAll({
+        where: orderWhere,
+        order: [['created_at', 'DESC']]
+      });
+
+      for (const order of orders) {
+        performanceData.push({
+          sales_exec: {
+            id: assignment.SalesExecutive?.id,
+            name: assignment.SalesExecutive?.name,
+            email: assignment.SalesExecutive?.email
+          },
+          shop: {
+            id: assignment.Shop?.id,
+            shop_name: assignment.Shop?.shop_name
+          },
+          order: {
+            id: order.id,
+            total_amount: order.total_amount,
+            status: order.status,
+            created_at: order.created_at
+          }
+        });
+      }
+    }
+
+    // Sort by order date desc
+    performanceData.sort((a, b) => new Date(b.order.created_at) - new Date(a.order.created_at));
+
+    return res.json({ success: true, message: 'Sales performance fetched successfully', data: { performance: performanceData } });
   } catch (err) {
-    console.error('Error fetching sales executive incentives:', err);
+    console.error('Error fetching sales performance:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

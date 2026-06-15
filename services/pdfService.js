@@ -48,8 +48,7 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.rect(0, 0, 612, 10).fill('#002d72');
 
     // 3. Header Branding
-    doc.fillColor('#002d72').fontSize(26).font('Helvetica-Bold').text('Woodland Distro', 50, 35);
-    doc.fillColor('#64748b').fontSize(10).font('Helvetica-Oblique').text('Premium Wholesale Distributor', 50, 65);
+    doc.fillColor('#002d72').fontSize(26).font('Helvetica-Bold').text('Woodland Distributors', 50, 35);
 
     // 4. Invoice Title & Metadata (Right Aligned)
     doc.fillColor('#1e293b').fontSize(22).font('Helvetica-Bold').text('INVOICE', 400, 35, { align: 'right', width: 162 });
@@ -68,11 +67,10 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.fillColor('#1e293b').text(`WS-${order.id}`, 470, metaY + 28, { width: 92, align: 'right' });
 
     // 5. Company Address (Left Aligned below tagline)
-    doc.fillColor('#1e293b').fontSize(9).font('Helvetica-Bold').text('Woodland Distro Inc.', 50, 90);
     doc.font('Helvetica').fillColor('#475569');
-    doc.text('1233 E Beamer St Suite E1', 50, 104);
-    doc.text('Woodland, CA 95776, United States', 50, 116);
-    doc.text('Phone: +1 530-490-8786', 50, 128);
+    doc.text('1233 E Beamer St Suite E1', 50, 90);
+    doc.text('Woodland, CA 95776, United States', 50, 102);
+    doc.text('Phone: +1 530-490-8786', 50, 114);
 
     // Divider
     doc.strokeColor('#e2e8f0').lineWidth(1).moveTo(50, 155).lineTo(562, 155).stroke();
@@ -85,27 +83,31 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.text(`Contact: ${shop.owner_name}`, 50, billToY + 30);
     doc.text(`Phone: ${shop.contact_details || 'N/A'}`, 50, billToY + 42);
     doc.text(`Address: ${[shop.address, shop.city, shop.state, shop.zip].filter(Boolean).join(', ') || 'N/A'}`, 50, billToY + 54, { width: 350 });
+    doc.text(`Seller Permit: ${shop.seller_permit || 'N/A'}`, 50, billToY + 66);
+    if (shop.tobacco_license) {
+      doc.text(`Tobacco License: ${shop.tobacco_license}`, 50, billToY + 78);
+    }
 
     // 7. Itemized Product Table
-    const tableTop = 275;
+    const tableTop = 295;
     
     // Draw table header background (dark blue)
     doc.rect(50, tableTop, 512, 22).fill('#002d72');
     
     // Table Header Text
     doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
-    doc.text('Product Name', 60, tableTop + 7, { width: 230 });
-    doc.text('Qty', 300, tableTop + 7, { width: 60, align: 'right' });
-    doc.text('Unit', 370, tableTop + 7, { width: 60, align: 'right' });
-    doc.text('Unit Price', 440, tableTop + 7, { width: 55, align: 'right' });
-    doc.text('Total', 505, tableTop + 7, { width: 50, align: 'right' });
+    doc.text('Product Name', 60, tableTop + 7, { width: 200 });
+    doc.text('SKU ID', 270, tableTop + 7, { width: 80 });
+    doc.text('Qty', 360, tableTop + 7, { width: 40, align: 'right' });
+    doc.text('Unit Price', 410, tableTop + 7, { width: 70, align: 'right' });
+    doc.text('Total', 490, tableTop + 7, { width: 65, align: 'right' });
     
     let position = tableTop + 22;
     doc.fontSize(9).font('Helvetica');
     
     (order.OrderItems || []).forEach((item, index) => {
       const name = item.Product?.name || `Product #${item.product_id}`;
-      const unit = item.Product?.unit || '—';
+      const skuId = item.Product?.sku_id || '—';
       const reqQty = item.requested_qty;
       const appQty = item.approved_qty ?? reqQty;
       const price = item.price;
@@ -117,11 +119,11 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
       
       // Text drawing
       doc.fillColor('#1e293b');
-      doc.text(name, 60, position + 7, { width: 230, ellipsis: true });
-      doc.text(String(appQty), 300, position + 7, { width: 60, align: 'right' });
-      doc.text(unit, 370, position + 7, { width: 60, align: 'right' });
-      doc.text(`$${price.toFixed(2)}`, 440, position + 7, { width: 55, align: 'right' });
-      doc.text(`$${total.toFixed(2)}`, 505, position + 7, { width: 50, align: 'right' });
+      doc.text(name, 60, position + 7, { width: 200, ellipsis: true });
+      doc.text(skuId, 270, position + 7, { width: 80, ellipsis: true });
+      doc.text(String(appQty), 360, position + 7, { width: 40, align: 'right' });
+      doc.text(`$${price.toFixed(2)}`, 410, position + 7, { width: 70, align: 'right' });
+      doc.text(`$${total.toFixed(2)}`, 490, position + 7, { width: 65, align: 'right' });
       
       // Underline border
       doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(50, position + 22).lineTo(562, position + 22).stroke();
@@ -161,9 +163,9 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.save();
     doc.opacity(0.05);
     doc.fillColor('#002d72');
-    doc.fontSize(48);
+    doc.fontSize(38);
     doc.rotate(-30, { origin: [306, 396] });
-    doc.text('Woodland Distro', 106, 370, { align: 'center', width: 400 });
+    doc.text('Woodland Distributors', 106, 370, { align: 'center', width: 400 });
     doc.restore();
 
     // 9. Footer (at the bottom of the page)
@@ -173,7 +175,7 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.fillColor('#94a3b8').fontSize(8).font('Helvetica').text('Thank you for your business', 50, footerTop + 10, { align: 'center', width: 512 });
     
     const genTime = formatCA_DateTime(new Date());
-    doc.fillColor('#cbd5e1').text(`Generated by Woodland Distro on ${genTime}`, 50, footerTop + 22, { align: 'center', width: 512 });
+    doc.fillColor('#cbd5e1').text(`Generated by Woodland Distributors on ${genTime}`, 50, footerTop + 22, { align: 'center', width: 512 });
 
     doc.end();
   });
