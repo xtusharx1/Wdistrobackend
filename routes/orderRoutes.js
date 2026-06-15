@@ -234,6 +234,26 @@ router.patch('/:id/process', async (req, res) => {
       include: [{ model: OrderItem, include: [Product] }]
     });
 
+    // Automatically generate invoice upon approval
+    let invoice = await Invoice.findOne({ where: { order_id: updatedOrder.id } });
+    if (!invoice) {
+      let pdfUrl = null;
+      if (shop) {
+        try {
+          pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
+        } catch (pdfErr) {
+          console.error('Failed to generate/upload invoice PDF:', pdfErr);
+        }
+      }
+      await Invoice.create({
+        order_id: updatedOrder.id,
+        final_amount: updatedOrder.total_amount,
+        shipping_charge: 0,
+        generated_at: new Date(),
+        pdf_url: pdfUrl
+      });
+    }
+
     return res.json({ success: true, message: 'Order processed successfully', data: { order: updatedOrder } });
   } catch (err) {
     console.error('Error processing order:', err);
@@ -480,6 +500,26 @@ router.put('/:id/approve', async (req, res) => {
     const updatedOrder = await Order.findByPk(id, {
       include: [{ model: OrderItem, include: [Product] }]
     });
+
+    // Automatically generate invoice upon approval
+    let invoice = await Invoice.findOne({ where: { order_id: updatedOrder.id } });
+    if (!invoice) {
+      let pdfUrl = null;
+      if (shop) {
+        try {
+          pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
+        } catch (pdfErr) {
+          console.error('Failed to generate/upload invoice PDF:', pdfErr);
+        }
+      }
+      await Invoice.create({
+        order_id: updatedOrder.id,
+        final_amount: updatedOrder.total_amount,
+        shipping_charge: 0,
+        generated_at: new Date(),
+        pdf_url: pdfUrl
+      });
+    }
 
     return res.json({ success: true, message: 'Order approved and processed successfully', data: { order: updatedOrder } });
   } catch (err) {
