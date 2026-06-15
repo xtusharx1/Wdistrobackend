@@ -56,7 +56,7 @@ router.post('/assignments', async (req, res) => {
   }
 });
 
-// Update an assignment (set end_date to deactivate, or adjust start_date)
+// Update an assignment (set end_date to deactivate, adjust start_date, or edit exec/shop)
 router.patch('/assignments/:id', async (req, res) => {
   try {
     const assignment = await SalesExecutiveAssignment.findByPk(req.params.id);
@@ -64,7 +64,24 @@ router.patch('/assignments/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Assignment not found' });
     }
 
-    const { end_date, start_date } = req.body;
+    const { end_date, start_date, sales_exec_id, shop_id } = req.body;
+    
+    if (sales_exec_id !== undefined) {
+      const exec = await User.findOne({ where: { id: sales_exec_id, role: 'Sales Executive' } });
+      if (!exec) {
+        return res.status(400).json({ success: false, message: 'Sales executive not found' });
+      }
+      assignment.sales_exec_id = sales_exec_id;
+    }
+
+    if (shop_id !== undefined) {
+      const shop = await Shop.findByPk(shop_id);
+      if (!shop) {
+        return res.status(400).json({ success: false, message: 'Shop not found' });
+      }
+      assignment.shop_id = shop_id;
+    }
+
     if (end_date !== undefined) assignment.end_date = end_date;
     if (start_date !== undefined) assignment.start_date = start_date;
     await assignment.save();

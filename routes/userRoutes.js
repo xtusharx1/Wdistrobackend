@@ -70,4 +70,31 @@ router.patch('/:id/reject', async (req, res) => {
   }
 });
 
+// Update user details
+router.patch('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, email, role, phone, password } = req.body;
+
+  try {
+    const user = await User.findByPk(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if (name) user.name = name;
+    if (email) user.email = email;
+    if (role) user.role = role;
+    if (phone !== undefined) user.phone = phone;
+    if (password) {
+      user.password = await bcrypt.hash(password, 10);
+    }
+
+    await user.save();
+    return res.json({ success: true, message: 'User updated successfully', data: { user } });
+  } catch (err) {
+    console.error('Error updating user:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 module.exports = router;

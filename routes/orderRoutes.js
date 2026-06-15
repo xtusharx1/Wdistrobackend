@@ -18,10 +18,21 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    const shop = await Shop.findByPk(shop_id);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop not found' });
+    }
+
     for (const item of items) {
       const product = await Product.findByPk(item.product_id);
       if (!product) {
         return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
+      }
+      if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+        return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
+      }
+      if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+        return res.status(403).json({ success: false, message: 'Tobacco License Required for this product category.' });
       }
       if (item.requested_qty > product.stock_quantity) {
         return res.status(400).json({ success: false, message: 'Requested quantity exceeds available stock.' });
@@ -148,6 +159,11 @@ router.patch('/:id/process', async (req, res) => {
       return res.status(400).json({ success: false, message: `Cannot process order in ${order.status} status` });
     }
 
+    const shop = await Shop.findByPk(order.shop_id);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop associated with this order not found' });
+    }
+
     let recalculatedTotal = 0;
 
     await sequelize.transaction(async (t) => {
@@ -165,6 +181,18 @@ router.patch('/:id/process', async (req, res) => {
           });
           if (!product) {
             throw new Error('Product not found');
+          }
+          if (updateItem.approved_qty > 0) {
+            if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+              const err = new Error('Seller Permit Required for this product category.');
+              err.statusCode = 403;
+              throw err;
+            }
+            if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+              const err = new Error('Tobacco License Required for this product category.');
+              err.statusCode = 403;
+              throw err;
+            }
           }
           if (updateItem.approved_qty > product.stock_quantity) {
             const err = new Error('Requested quantity exceeds available stock.');
@@ -209,8 +237,8 @@ router.patch('/:id/process', async (req, res) => {
     return res.json({ success: true, message: 'Order processed successfully', data: { order: updatedOrder } });
   } catch (err) {
     console.error('Error processing order:', err);
-    if (err.statusCode === 400) {
-      return res.status(400).json({ success: false, message: err.message });
+    if (err.statusCode === 400 || err.statusCode === 403) {
+      return res.status(err.statusCode).json({ success: false, message: err.message });
     }
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
@@ -378,6 +406,11 @@ router.put('/:id/approve', async (req, res) => {
       return res.status(400).json({ success: false, message: `Cannot approve order in ${order.status} status` });
     }
 
+    const shop = await Shop.findByPk(order.shop_id);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop associated with this order not found' });
+    }
+
     let recalculatedTotal = 0;
 
     await sequelize.transaction(async (t) => {
@@ -395,6 +428,18 @@ router.put('/:id/approve', async (req, res) => {
           });
           if (!product) {
             throw new Error('Product not found');
+          }
+          if (updateItem.approved_qty > 0) {
+            if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+              const err = new Error('Seller Permit Required for this product category.');
+              err.statusCode = 403;
+              throw err;
+            }
+            if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+              const err = new Error('Tobacco License Required for this product category.');
+              err.statusCode = 403;
+              throw err;
+            }
           }
           if (updateItem.approved_qty > product.stock_quantity) {
             const err = new Error('Requested quantity exceeds available stock.');
@@ -439,8 +484,8 @@ router.put('/:id/approve', async (req, res) => {
     return res.json({ success: true, message: 'Order approved and processed successfully', data: { order: updatedOrder } });
   } catch (err) {
     console.error('Error approving order:', err);
-    if (err.statusCode === 400) {
-      return res.status(400).json({ success: false, message: err.message });
+    if (err.statusCode === 400 || err.statusCode === 403) {
+      return res.status(err.statusCode).json({ success: false, message: err.message });
     }
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }

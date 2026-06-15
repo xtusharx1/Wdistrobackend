@@ -94,4 +94,61 @@ router.patch('/:id/reject', async (req, res) => {
   }
 });
 
+// Update shop fields
+router.patch('/:id', async (req, res) => {
+  const { id } = req.params;
+  const {
+    shop_name,
+    seller_permit,
+    seller_permit_active,
+    tobacco_license,
+    tobacco_license_active,
+    tobacco_license_number,
+    tobacco_license_expiry,
+    tobacco_license_document,
+    owner_name,
+    email,
+    contact_details,
+    address,
+    city,
+    state,
+    zip,
+    approved,
+    approval_status
+  } = req.body;
+
+  try {
+    const shop = await Shop.findByPk(id);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop not found' });
+    }
+
+    if (shop_name !== undefined) shop.shop_name = shop_name;
+    if (seller_permit !== undefined) shop.seller_permit = seller_permit;
+    if (seller_permit_active !== undefined) shop.seller_permit_active = seller_permit_active;
+    if (tobacco_license !== undefined) shop.tobacco_license = tobacco_license;
+    if (tobacco_license_active !== undefined) shop.tobacco_license_active = tobacco_license_active;
+    if (tobacco_license_number !== undefined) shop.tobacco_license_number = tobacco_license_number;
+    if (tobacco_license_expiry !== undefined) {
+      shop.tobacco_license_expiry = tobacco_license_expiry ? new Date(tobacco_license_expiry) : null;
+    }
+    if (tobacco_license_document !== undefined) shop.tobacco_license_document = tobacco_license_document;
+    if (owner_name !== undefined) shop.owner_name = owner_name;
+    if (email !== undefined) shop.email = email;
+    if (contact_details !== undefined) shop.contact_details = contact_details;
+    if (address !== undefined) shop.address = address;
+    if (city !== undefined) shop.city = city;
+    if (state !== undefined) shop.state = state;
+    if (zip !== undefined) shop.zip = zip;
+    if (approved !== undefined) shop.approved = approved;
+    if (approval_status !== undefined) shop.approval_status = approval_status;
+
+    await shop.save();
+    return res.json({ success: true, message: 'Shop updated successfully', data: { shop } });
+  } catch (err) {
+    console.error('Error updating shop:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 module.exports = router;

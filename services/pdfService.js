@@ -96,11 +96,13 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     
     // Table Header Text
     doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
-    doc.text('Product Name', 60, tableTop + 7, { width: 200 });
-    doc.text('SKU ID', 270, tableTop + 7, { width: 80 });
-    doc.text('Qty', 360, tableTop + 7, { width: 40, align: 'right' });
-    doc.text('Unit Price', 410, tableTop + 7, { width: 70, align: 'right' });
-    doc.text('Total', 490, tableTop + 7, { width: 65, align: 'right' });
+    doc.text('Product Name', 60, tableTop + 7, { width: 150 });
+    doc.text('SKU ID', 215, tableTop + 7, { width: 65 });
+    doc.text('Qty', 285, tableTop + 7, { width: 25, align: 'right' });
+    doc.text('Orig Price', 315, tableTop + 7, { width: 55, align: 'right' });
+    doc.text('Discount', 375, tableTop + 7, { width: 55, align: 'right' });
+    doc.text('Final Price', 435, tableTop + 7, { width: 60, align: 'right' });
+    doc.text('Total', 500, tableTop + 7, { width: 55, align: 'right' });
     
     let position = tableTop + 22;
     doc.fontSize(9).font('Helvetica');
@@ -110,8 +112,10 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
       const skuId = item.Product?.sku_id || '—';
       const reqQty = item.requested_qty;
       const appQty = item.approved_qty ?? reqQty;
-      const price = (item.custom_price !== null && item.custom_price !== undefined) ? item.custom_price : item.price;
-      const total = price * appQty;
+      const originalPrice = item.price;
+      const finalPrice = (item.custom_price !== null && item.custom_price !== undefined) ? item.custom_price : item.price;
+      const discount = originalPrice - finalPrice;
+      const total = finalPrice * appQty;
       
       // Zebra striping
       doc.fillColor(index % 2 === 0 ? '#f8fafc' : '#ffffff');
@@ -119,11 +123,13 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
       
       // Text drawing
       doc.fillColor('#1e293b');
-      doc.text(name, 60, position + 7, { width: 200, ellipsis: true });
-      doc.text(skuId, 270, position + 7, { width: 80, ellipsis: true });
-      doc.text(String(appQty), 360, position + 7, { width: 40, align: 'right' });
-      doc.text(`$${price.toFixed(2)}`, 410, position + 7, { width: 70, align: 'right' });
-      doc.text(`$${total.toFixed(2)}`, 490, position + 7, { width: 65, align: 'right' });
+      doc.text(name, 60, position + 7, { width: 150, ellipsis: true });
+      doc.text(skuId, 215, position + 7, { width: 65, ellipsis: true });
+      doc.text(String(appQty), 285, position + 7, { width: 25, align: 'right' });
+      doc.text(`$${originalPrice.toFixed(2)}`, 315, position + 7, { width: 55, align: 'right' });
+      doc.text(`$${discount.toFixed(2)}`, 375, position + 7, { width: 55, align: 'right' });
+      doc.text(`$${finalPrice.toFixed(2)}`, 435, position + 7, { width: 60, align: 'right' });
+      doc.text(`$${total.toFixed(2)}`, 500, position + 7, { width: 55, align: 'right' });
       
       // Underline border
       doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(50, position + 22).lineTo(562, position + 22).stroke();
@@ -136,10 +142,26 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     doc.strokeColor('#e2e8f0').lineWidth(1).moveTo(350, position).lineTo(562, position).stroke();
     position += 10;
     
+    // Calculate totals
+    let originalSubtotal = 0;
+    let totalDiscount = 0;
+    (order.OrderItems || []).forEach(item => {
+      const appQty = item.approved_qty ?? item.requested_qty;
+      const finalPrice = (item.custom_price !== null && item.custom_price !== undefined) ? item.custom_price : item.price;
+      originalSubtotal += item.price * appQty;
+      totalDiscount += (item.price - finalPrice) * appQty;
+    });
+
     // Subtotal
     doc.fillColor('#64748b').fontSize(9).font('Helvetica');
     doc.text('Subtotal:', 350, position, { width: 100, align: 'right' });
-    doc.fillColor('#1e293b').font('Helvetica-Bold').text(`$${order.total_amount.toFixed(2)}`, 450, position, { width: 112, align: 'right' });
+    doc.fillColor('#1e293b').font('Helvetica-Bold').text(`$${originalSubtotal.toFixed(2)}`, 450, position, { width: 112, align: 'right' });
+    position += 15;
+
+    // Total Discount
+    doc.fillColor('#64748b').font('Helvetica');
+    doc.text('Total Discount:', 350, position, { width: 100, align: 'right' });
+    doc.fillColor('#dc2626').font('Helvetica-Bold').text(`-$${totalDiscount.toFixed(2)}`, 450, position, { width: 112, align: 'right' });
     position += 15;
 
     // Shipping Charges
@@ -153,9 +175,9 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
     position += 8;
 
     // Grand Total
-    const grandTotal = order.total_amount + shipping_charge;
+    const grandTotal = originalSubtotal - totalDiscount + shipping_charge;
     doc.fillColor('#475569').fontSize(10).font('Helvetica-Bold');
-    doc.text('Grand Total:', 350, position, { width: 100, align: 'right' });
+    doc.text('Final Payable:', 350, position, { width: 100, align: 'right' });
     doc.fillColor('#002d72').fontSize(14).font('Helvetica-Bold');
     doc.text(`$${grandTotal.toFixed(2)}`, 450, position - 3, { width: 112, align: 'right' });
 
