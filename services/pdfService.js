@@ -110,7 +110,7 @@ const generateInvoicePDFBuffer = (order, shop, shipping_charge = 0) => {
       const skuId = item.Product?.sku_id || '—';
       const reqQty = item.requested_qty;
       const appQty = item.approved_qty ?? reqQty;
-      const price = item.price;
+      const price = (item.custom_price !== null && item.custom_price !== undefined) ? item.custom_price : item.price;
       const total = price * appQty;
       
       // Zebra striping

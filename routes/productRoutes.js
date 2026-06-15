@@ -63,13 +63,13 @@ router.post('/upload', (req, res) => {
 
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, unit, category, stock_quantity, image_url, sku_id } = req.body;
-  if (!name || !price || !unit || stock_quantity === undefined) {
-    return res.status(400).json({ success: false, message: 'Name, price, unit, and stock_quantity are required' });
+  const { name, price, purchase_cost, category, stock_quantity, image_url, sku_id } = req.body;
+  if (!name || price === undefined || stock_quantity === undefined) {
+    return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
 
   try {
-    const product = await Product.create({ name, price, unit, category: category || 'General', stock_quantity, image_url, sku_id });
+    const product = await Product.create({ name, price, purchase_cost, category: category || 'General', stock_quantity, image_url, sku_id });
     return res.status(201).json({ success: true, message: 'Product created successfully', data: { product } });
   } catch (err) {
     console.error('Error creating product:', err);
@@ -87,11 +87,11 @@ router.post('/bulk', async (req, res) => {
 
   // Validate each product in the array
   for (let i = 0; i < productsInput.length; i++) {
-    const { name, price, unit, stock_quantity } = productsInput[i];
-    if (!name || price === undefined || !unit || stock_quantity === undefined) {
+    const { name, price, stock_quantity } = productsInput[i];
+    if (!name || price === undefined || stock_quantity === undefined) {
       return res.status(400).json({
         success: false,
-        message: `Product at index ${i} is missing required fields (name, price, unit, stock_quantity)`
+        message: `Product at index ${i} is missing required fields (name, price, stock_quantity)`
       });
     }
   }
@@ -102,7 +102,7 @@ router.post('/bulk', async (req, res) => {
         name: p.name,
         sku_id: p.sku_id || null,
         price: p.price,
-        unit: p.unit,
+        purchase_cost: p.purchase_cost !== undefined ? p.purchase_cost : null,
         category: p.category || 'General',
         stock_quantity: p.stock_quantity,
         image_url: p.image_url || null
@@ -138,12 +138,20 @@ router.get('/', async (req, res) => {
     }
 
     const { count, rows: products } = await Product.findAndCountAll(options);
+    const userRole = req.headers['x-user-role'];
+    const sanitizedProducts = products.map(product => {
+      const p = product.toJSON();
+      if (userRole !== 'Admin') {
+        delete p.purchase_cost;
+      }
+      return p;
+    });
 
     return res.json({ 
       success: true, 
       message: 'Products fetched successfully', 
       data: { 
-        products,
+        products: sanitizedProducts,
         pagination: {
           total: count,
           page: limit ? parseInt(page || 1) : 1,
@@ -161,7 +169,7 @@ router.get('/', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, unit, category, stock_quantity, image_url, sku_id } = req.body;
+  const { name, price, purchase_cost, category, stock_quantity, image_url, sku_id } = req.body;
 
   try {
     const product = await Product.findByPk(id);
@@ -171,8 +179,8 @@ router.patch('/:id', async (req, res) => {
 
     if (name) product.name = name;
     if (sku_id !== undefined) product.sku_id = sku_id;
-    if (price) product.price = price;
-    if (unit) product.unit = unit;
+    if (price !== undefined) product.price = price;
+    if (purchase_cost !== undefined) product.purchase_cost = purchase_cost;
     if (category) product.category = category;
     if (stock_quantity !== undefined) product.stock_quantity = stock_quantity;
     if (image_url !== undefined) product.image_url = image_url;

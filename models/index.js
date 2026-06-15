@@ -5,6 +5,7 @@ const Order = require('./Order');
 const OrderItem = require('./OrderItem');
 const Invoice = require('./Invoice');
 const SalesExecutiveAssignment = require('./SalesExecutiveAssignment');
+const StockMovement = require('./StockMovement');
 
 
 
@@ -29,6 +30,12 @@ Product.hasMany(OrderItem, { foreignKey: 'product_id' });
 Invoice.belongsTo(Order, { foreignKey: 'order_id' });
 Order.hasOne(Invoice, { foreignKey: 'order_id' });
 
+// 8. StockMovement associations
+StockMovement.belongsTo(Product, { foreignKey: 'product_id' });
+Product.hasMany(StockMovement, { foreignKey: 'product_id' });
+StockMovement.belongsTo(Order, { foreignKey: 'order_id' });
+Order.hasMany(StockMovement, { foreignKey: 'order_id' });
+
 module.exports = {
   User,
   Shop,
@@ -36,5 +43,6 @@ module.exports = {
   Order,
   OrderItem,
   Invoice,
-  SalesExecutiveAssignment
+  SalesExecutiveAssignment,
+  StockMovement
 };

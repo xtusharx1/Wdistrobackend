@@ -23,7 +23,8 @@ const OrderItem = sequelize.define('OrderItem', {
   },
   requested_qty: { type: DataTypes.INTEGER, allowNull: false },
   approved_qty: { type: DataTypes.INTEGER, allowNull: true },
-  price: { type: DataTypes.FLOAT, allowNull: false }
+  price: { type: DataTypes.FLOAT, allowNull: false },
+  custom_price: { type: DataTypes.FLOAT, allowNull: true }
 }, {
   timestamps: false
 });

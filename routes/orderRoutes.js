@@ -5,6 +5,8 @@ const Product = require('../models/Product');
 const Invoice = require('../models/Invoice');
 const Shop = require('../models/Shop');
 const { uploadInvoicePDF } = require('../services/pdfService');
+const sequelize = require('../config/db');
+const StockMovement = require('../models/StockMovement');
 
 const router = express.Router();
 
@@ -16,6 +18,16 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    for (const item of items) {
+      const product = await Product.findByPk(item.product_id);
+      if (!product) {
+        return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
+      }
+      if (item.requested_qty > product.stock_quantity) {
+        return res.status(400).json({ success: false, message: 'Requested quantity exceeds available stock.' });
+      }
+    }
+
     const order = await Order.create({ shop_id, total_amount, status: 'pending' });
 
     const orderItems = items.map((item) => ({
@@ -138,23 +150,56 @@ router.patch('/:id/process', async (req, res) => {
 
     let recalculatedTotal = 0;
 
-    // Update each order item
-    for (const updateItem of items) {
-      const orderItem = await OrderItem.findOne({ 
-        where: { id: updateItem.id, order_id: order.id } 
-      });
-      
-      if (orderItem) {
-        orderItem.approved_qty = updateItem.approved_qty;
-        await orderItem.save();
-        recalculatedTotal += orderItem.price * updateItem.approved_qty;
-      }
-    }
+    await sequelize.transaction(async (t) => {
+      // Update each order item
+      for (const updateItem of items) {
+        const orderItem = await OrderItem.findOne({ 
+          where: { id: updateItem.id, order_id: order.id },
+          transaction: t
+        });
+        
+        if (orderItem) {
+          const product = await Product.findByPk(orderItem.product_id, {
+            transaction: t,
+            lock: t.LOCK.UPDATE
+          });
+          if (!product) {
+            throw new Error('Product not found');
+          }
+          if (updateItem.approved_qty > product.stock_quantity) {
+            const err = new Error('Requested quantity exceeds available stock.');
+            err.statusCode = 400;
+            throw err;
+          }
 
-    order.total_amount = recalculatedTotal;
-    order.status = 'approved';
-    order.approved_at = new Date();
-    await order.save();
+          const prevStock = product.stock_quantity;
+          product.stock_quantity -= updateItem.approved_qty;
+          await product.save({ transaction: t });
+
+          // Log StockMovement
+          await StockMovement.create({
+            product_id: product.id,
+            quantity_changed: -updateItem.approved_qty,
+            previous_stock: prevStock,
+            new_stock: product.stock_quantity,
+            order_id: order.id,
+            action: 'Approval'
+          }, { transaction: t });
+
+          orderItem.approved_qty = updateItem.approved_qty;
+          orderItem.custom_price = (updateItem.custom_price !== undefined && updateItem.custom_price !== null && updateItem.custom_price !== '') ? parseFloat(updateItem.custom_price) : null;
+          await orderItem.save({ transaction: t });
+          
+          const effectivePrice = (orderItem.custom_price !== null && orderItem.custom_price !== undefined) ? orderItem.custom_price : orderItem.price;
+          recalculatedTotal += effectivePrice * updateItem.approved_qty;
+        }
+      }
+
+      order.total_amount = recalculatedTotal;
+      order.status = 'approved';
+      order.approved_at = new Date();
+      await order.save({ transaction: t });
+    });
 
     // Fetch the updated order with full details
     const updatedOrder = await Order.findByPk(id, {
@@ -164,6 +209,9 @@ router.patch('/:id/process', async (req, res) => {
     return res.json({ success: true, message: 'Order processed successfully', data: { order: updatedOrder } });
   } catch (err) {
     console.error('Error processing order:', err);
+    if (err.statusCode === 400) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -175,7 +223,7 @@ router.patch('/:id/status', async (req, res) => {
   const userRole = req.headers['x-user-role'];
   const userId = req.headers['x-user-id'];
 
-  const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed'];
+  const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed', 'cancelled'];
   if (!status || !validStatuses.includes(status)) {
     return res.status(400).json({ success: false, message: `Valid status (${validStatuses.join(', ')}) is required` });
   }
@@ -189,6 +237,52 @@ router.patch('/:id/status', async (req, res) => {
     const order = await Order.findByPk(id);
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (status === 'cancelled') {
+      if (order.status === 'cancelled') {
+        return res.status(400).json({ success: false, message: 'Order is already cancelled' });
+      }
+
+      const previousStatus = order.status;
+
+      await sequelize.transaction(async (t) => {
+        if (previousStatus !== 'pending') {
+          const orderItems = await OrderItem.findAll({
+            where: { order_id: order.id },
+            transaction: t
+          });
+
+          for (const item of orderItems) {
+            if (item.approved_qty > 0) {
+              const product = await Product.findByPk(item.product_id, {
+                transaction: t,
+                lock: t.LOCK.UPDATE
+              });
+              if (product) {
+                const prevStock = product.stock_quantity;
+                product.stock_quantity += item.approved_qty;
+                await product.save({ transaction: t });
+
+                // Log StockMovement
+                await StockMovement.create({
+                  product_id: product.id,
+                  quantity_changed: item.approved_qty,
+                  previous_stock: prevStock,
+                  new_stock: product.stock_quantity,
+                  order_id: order.id,
+                  action: 'Cancellation'
+                }, { transaction: t });
+              }
+            }
+          }
+        }
+
+        order.status = 'cancelled';
+        await order.save({ transaction: t });
+      });
+
+      return res.json({ success: true, message: 'Order cancelled successfully', data: { order } });
     }
 
     // Enforce basic flow constraints if necessary, or just allow transitions
@@ -280,25 +374,62 @@ router.put('/:id/approve', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    let recalculatedTotal = 0;
-
-    // Update each order item's approved_qty
-    for (const updateItem of items) {
-      const orderItem = await OrderItem.findOne({ 
-        where: { id: updateItem.id, order_id: order.id } 
-      });
-      
-      if (orderItem) {
-        orderItem.approved_qty = updateItem.approved_qty;
-        await orderItem.save();
-        recalculatedTotal += orderItem.price * updateItem.approved_qty;
-      }
+    if (order.status !== 'pending') {
+      return res.status(400).json({ success: false, message: `Cannot approve order in ${order.status} status` });
     }
 
-    order.total_amount = recalculatedTotal;
-    order.status = 'approved';
-    order.approved_at = new Date();
-    await order.save();
+    let recalculatedTotal = 0;
+
+    await sequelize.transaction(async (t) => {
+      // Update each order item's approved_qty
+      for (const updateItem of items) {
+        const orderItem = await OrderItem.findOne({ 
+          where: { id: updateItem.id, order_id: order.id },
+          transaction: t
+        });
+        
+        if (orderItem) {
+          const product = await Product.findByPk(orderItem.product_id, {
+            transaction: t,
+            lock: t.LOCK.UPDATE
+          });
+          if (!product) {
+            throw new Error('Product not found');
+          }
+          if (updateItem.approved_qty > product.stock_quantity) {
+            const err = new Error('Requested quantity exceeds available stock.');
+            err.statusCode = 400;
+            throw err;
+          }
+
+          const prevStock = product.stock_quantity;
+          product.stock_quantity -= updateItem.approved_qty;
+          await product.save({ transaction: t });
+
+          // Log StockMovement
+          await StockMovement.create({
+            product_id: product.id,
+            quantity_changed: -updateItem.approved_qty,
+            previous_stock: prevStock,
+            new_stock: product.stock_quantity,
+            order_id: order.id,
+            action: 'Approval'
+          }, { transaction: t });
+
+          orderItem.approved_qty = updateItem.approved_qty;
+          orderItem.custom_price = (updateItem.custom_price !== undefined && updateItem.custom_price !== null && updateItem.custom_price !== '') ? parseFloat(updateItem.custom_price) : null;
+          await orderItem.save({ transaction: t });
+
+          const effectivePrice = (orderItem.custom_price !== null && orderItem.custom_price !== undefined) ? orderItem.custom_price : orderItem.price;
+          recalculatedTotal += effectivePrice * updateItem.approved_qty;
+        }
+      }
+
+      order.total_amount = recalculatedTotal;
+      order.status = 'approved';
+      order.approved_at = new Date();
+      await order.save({ transaction: t });
+    });
 
     // Fetch the updated order with full details
     const updatedOrder = await Order.findByPk(id, {
@@ -308,6 +439,9 @@ router.put('/:id/approve', async (req, res) => {
     return res.json({ success: true, message: 'Order approved and processed successfully', data: { order: updatedOrder } });
   } catch (err) {
     console.error('Error approving order:', err);
+    if (err.statusCode === 400) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

@@ -47,7 +47,11 @@ app.use('/sales', salesRoutes);
 
 const PORT = process.env.PORT || 3000;
 
-sequelize.sync({ alter: true })
+sequelize.query("ALTER TYPE \"enum_Orders_status\" ADD VALUE IF NOT EXISTS 'cancelled'")
+  .catch((err) => {
+    console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
+  })
+  .then(() => sequelize.sync({ alter: true }))
   .then(() => {
     console.log("Database models synced successfully with { alter: true } ✅");
     if (require.main === module) {
