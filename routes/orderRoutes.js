@@ -28,10 +28,10 @@ router.post('/', async (req, res) => {
       if (!product) {
         return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
       }
-      if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+      if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
         return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
       }
-      if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+      if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
         return res.status(403).json({ success: false, message: 'Tobacco License Required for this product category.' });
       }
       if (item.requested_qty > product.stock_quantity) {
@@ -183,12 +183,12 @@ router.patch('/:id/process', async (req, res) => {
             throw new Error('Product not found');
           }
           if (updateItem.approved_qty > 0) {
-            if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+            if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
               const err = new Error('Seller Permit Required for this product category.');
               err.statusCode = 403;
               throw err;
             }
-            if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+            if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
               const err = new Error('Tobacco License Required for this product category.');
               err.statusCode = 403;
               throw err;
@@ -430,12 +430,12 @@ router.put('/:id/approve', async (req, res) => {
             throw new Error('Product not found');
           }
           if (updateItem.approved_qty > 0) {
-            if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+            if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
               const err = new Error('Seller Permit Required for this product category.');
               err.statusCode = 403;
               throw err;
             }
-            if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+            if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
               const err = new Error('Tobacco License Required for this product category.');
               err.statusCode = 403;
               throw err;

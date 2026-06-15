@@ -154,10 +154,10 @@ router.get('/', async (req, res) => {
       const shop = await Shop.findByPk(shopId);
       if (shop) {
         const allowedLicenses = [];
-        if (shop.seller_permit_active) {
+        if (shop.seller_permit && shop.approved) {
           allowedLicenses.push('Seller Permit');
         }
-        if (shop.tobacco_license_active) {
+        if (shop.tobacco_license && shop.approved) {
           allowedLicenses.push('Tobacco License');
         }
         whereClause.required_license = { [Op.in]: allowedLicenses };
@@ -220,10 +220,10 @@ router.get('/:id', async (req, res) => {
     if (shopId) {
       const shop = await Shop.findByPk(shopId);
       if (shop) {
-        if (product.required_license === 'Seller Permit' && !shop.seller_permit_active) {
+        if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
           return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
         }
-        if (product.required_license === 'Tobacco License' && !shop.tobacco_license_active) {
+        if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
           return res.status(403).json({ success: false, message: 'Tobacco License Required for this product category.' });
         }
       }
