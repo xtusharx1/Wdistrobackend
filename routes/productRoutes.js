@@ -62,9 +62,49 @@ router.post('/upload', (req, res) => {
   });
 });
 
+// Clean string: lowercase, remove punctuation, normalize spaces
+const cleanString = (str) => {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+// Calculate Levenshtein Distance
+const getLevenshteinDistance = (str1, str2) => {
+  const s1 = cleanString(str1);
+  const s2 = cleanString(str2);
+  const track = Array(s2.length + 1).fill(null).map(() => Array(s1.length + 1).fill(null));
+  for (let i = 0; i <= s1.length; i += 1) track[0][i] = i;
+  for (let j = 0; j <= s2.length; j += 1) track[j][0] = j;
+  for (let j = 1; j <= s2.length; j += 1) {
+    for (let i = 1; i <= s1.length; i += 1) {
+      const indicator = s1[i - 1] === s2[j - 1] ? 0 : 1;
+      track[j][i] = Math.min(
+        track[j][i - 1] + 1, // deletion
+        track[j - 1][i] + 1, // insertion
+        track[j - 1][i - 1] + indicator // substitution
+      );
+    }
+  }
+  return track[s2.length][s1.length];
+};
+
+// Calculate Levenshtein Similarity (0.0 to 1.0)
+const getLevenshteinSimilarity = (str1, str2) => {
+  const s1 = cleanString(str1);
+  const s2 = cleanString(str2);
+  const maxLength = Math.max(s1.length, s2.length);
+  if (maxLength === 0) return 1.0;
+  const dist = getLevenshteinDistance(str1, str2);
+  return (maxLength - dist) / maxLength;
+};
+
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck } = req.body;
   if (!name || price === undefined || stock_quantity === undefined) {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
@@ -74,6 +114,28 @@ router.post('/', async (req, res) => {
   const reqLicense = requiredLicense || required_license || ((mainCat === 'Tobacco' || mainCat === 'Vape') ? 'Tobacco License' : 'Seller Permit');
 
   try {
+    // 1. Check for duplicates if not bypassed
+    if (!bypassDuplicateCheck) {
+      const existingProducts = await Product.findAll();
+      const potentialDuplicates = [];
+      for (const p of existingProducts) {
+        const similarity = getLevenshteinSimilarity(name, p.name);
+        if (similarity >= 0.80) {
+          potentialDuplicates.push(p);
+        }
+      }
+      if (potentialDuplicates.length > 0) {
+        return res.status(409).json({
+          success: false,
+          code: 'POTENTIAL_DUPLICATE',
+          message: 'A similar product already exists. Please review the existing product before creating a duplicate.',
+          data: {
+            duplicates: potentialDuplicates
+          }
+        });
+      }
+    }
+
     const product = await Product.create({
       name,
       price,
@@ -84,7 +146,8 @@ router.post('/', async (req, res) => {
       required_license: reqLicense,
       stock_quantity,
       image_url,
-      sku_id
+      sku_id,
+      description
     });
     return res.status(201).json({ success: true, message: 'Product created successfully', data: { product } });
   } catch (err) {
@@ -128,7 +191,8 @@ router.post('/bulk', async (req, res) => {
           sub_category: subCat,
           required_license: reqLicense,
           stock_quantity: p.stock_quantity,
-          image_url: p.image_url || null
+          image_url: p.image_url || null,
+          description: p.description || null
         };
       })
     );
@@ -142,12 +206,22 @@ router.post('/bulk', async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
     if (search) {
       whereClause.name = { [Op.iLike]: `%${search}%` };
+    }
+
+    const mainCat = main_category || mainCategory;
+    if (mainCat && mainCat !== 'All') {
+      whereClause.main_category = mainCat;
+    }
+
+    const subCat = sub_category || subCategory;
+    if (subCat && subCat !== 'All') {
+      whereClause.sub_category = subCat;
     }
 
     if (shopId) {
@@ -164,9 +238,25 @@ router.get('/', async (req, res) => {
       }
     }
 
+    let orderClause = [['created_at', 'DESC']];
+    if (sortBy) {
+      let sortCol = 'created_at';
+      if (sortBy === 'name') sortCol = 'name';
+      else if (sortBy === 'sku_id' || sortBy === 'sku') sortCol = 'sku_id';
+      else if (sortBy === 'price') sortCol = 'price';
+      else if (sortBy === 'stock' || sortBy === 'stock_quantity') sortCol = 'stock_quantity';
+      else if (sortBy === 'created_at') sortCol = 'created_at';
+
+      const dir = (sortOrder && sortOrder.toLowerCase() === 'asc') ? 'ASC' : 'DESC';
+      orderClause = [[sortCol, dir]];
+    }
+    
+    // Always append id as a secondary sorting key to guarantee a stable sort order
+    orderClause.push(['id', 'ASC']);
+
     const options = {
       where: whereClause,
-      order: [['created_at', 'DESC']]
+      order: orderClause
     };
 
     if (limit) {
@@ -244,7 +334,7 @@ router.get('/:id', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description } = req.body;
 
   try {
     const product = await Product.findByPk(id);
@@ -276,6 +366,7 @@ router.patch('/:id', async (req, res) => {
 
     if (stock_quantity !== undefined) product.stock_quantity = stock_quantity;
     if (image_url !== undefined) product.image_url = image_url;
+    if (description !== undefined) product.description = description;
 
     await product.save();
     return res.json({ success: true, message: 'Product updated successfully', data: { product } });

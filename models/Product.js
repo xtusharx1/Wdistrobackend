@@ -12,7 +12,8 @@ const Product = sequelize.define('Product', {
   sub_category: { type: DataTypes.STRING, defaultValue: 'Misc', allowNull: false },
   required_license: { type: DataTypes.STRING, defaultValue: 'Seller Permit', allowNull: false },
   stock_quantity: { type: DataTypes.INTEGER, allowNull: false },
-  image_url: { type: DataTypes.STRING, allowNull: true }
+  image_url: { type: DataTypes.STRING, allowNull: true },
+  description: { type: DataTypes.TEXT, allowNull: true }
 }, {
   timestamps: true,
   createdAt: 'created_at',
