@@ -13,7 +13,8 @@ const Product = sequelize.define('Product', {
   required_license: { type: DataTypes.STRING, defaultValue: 'Seller Permit', allowNull: false },
   stock_quantity: { type: DataTypes.INTEGER, allowNull: false },
   image_url: { type: DataTypes.STRING, allowNull: true },
-  description: { type: DataTypes.TEXT, allowNull: true }
+  description: { type: DataTypes.TEXT, allowNull: true },
+  is_active: { type: DataTypes.BOOLEAN, defaultValue: true, allowNull: false }
 }, {
   timestamps: true,
   createdAt: 'created_at',

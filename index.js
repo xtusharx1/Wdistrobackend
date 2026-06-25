@@ -1,3 +1,6 @@
+console.time('🔄 Total Startup Time');
+console.time('📦 Imports and Model Loading');
+
 process.on('uncaughtException', (err) => {
   console.error('⚠️ UNCAUGHT EXCEPTION:', err);
 });
@@ -16,6 +19,9 @@ const fs = require('fs');
 const path = require('path');
 const sequelize = require('./config/db');
 require('./models');
+console.timeEnd('📦 Imports and Model Loading');
+
+console.time('🛣️ Route Registration');
 const shopAuthRoutes = require('./routes/shopAuthRoutes');
 const userAuthRoutes = require('./routes/userAuthRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -48,24 +54,35 @@ app.use('/orders', orderRoutes);
 app.use('/invoices', invoiceRoutes);
 app.use('/sales', salesRoutes);
 app.use('/dashboard', dashboardRoutes);
+console.timeEnd('🛣️ Route Registration');
 
 const PORT = process.env.PORT || 3000;
 
-sequelize.query("ALTER TYPE \"enum_Orders_status\" ADD VALUE IF NOT EXISTS 'cancelled'")
-  .catch((err) => {
-    console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
-  })
-  .then(() => sequelize.sync({ alter: true }))
-  .then(() => {
-    console.log("Database models synced successfully with { alter: true } ✅");
-    if (require.main === module) {
-      app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+if (require.main === module) {
+  console.time('🚀 Express Server Listen');
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+    console.timeEnd('🚀 Express Server Listen');
+    console.timeEnd('🔄 Total Startup Time');
+
+    // Run database sync asynchronously in the background so it doesn't block server startup
+    console.log("Database sync started asynchronously in the background...");
+    console.time('💾 Database Sync duration');
+    sequelize.query("ALTER TYPE \"enum_Orders_status\" ADD VALUE IF NOT EXISTS 'cancelled'")
+      .catch((err) => {
+        console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
+      })
+      .then(() => {
+        return sequelize.sync({ alter: true });
+      })
+      .then(() => {
+        console.log("Database models synced successfully with { alter: true } ✅");
+        console.timeEnd('💾 Database Sync duration');
+      })
+      .catch((err) => {
+        console.error("Failed to sync database models ❌", err);
       });
-    }
-  })
-  .catch((err) => {
-    console.error("Failed to sync database models ❌", err);
   });
+}
 
 module.exports = app;

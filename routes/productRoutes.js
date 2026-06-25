@@ -206,7 +206,7 @@ router.post('/bulk', async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
@@ -230,7 +230,14 @@ router.get('/', async (req, res) => {
       whereClause.stock_quantity = 0;
     }
 
+    if (is_active === 'true' || is_active === true) {
+      whereClause.is_active = true;
+    } else if (is_active === 'false' || is_active === false) {
+      whereClause.is_active = false;
+    }
+
     if (shopId) {
+      whereClause.is_active = true;
       const shop = await Shop.findByPk(shopId);
       if (shop) {
         const allowedLicenses = [];
@@ -340,7 +347,7 @@ router.get('/:id', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active } = req.body;
 
   try {
     const product = await Product.findByPk(id);
@@ -352,6 +359,7 @@ router.patch('/:id', async (req, res) => {
     if (sku_id !== undefined) product.sku_id = sku_id;
     if (price !== undefined) product.price = price;
     if (purchase_cost !== undefined) product.purchase_cost = purchase_cost;
+    if (is_active !== undefined) product.is_active = is_active;
     
     const mainCat = mainCategory || main_category;
     if (mainCat) {
@@ -414,6 +422,16 @@ router.delete('/:id', async (req, res) => {
     const product = await Product.findByPk(id);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    // Check if there are any existing OrderItems referencing this product
+    const OrderItem = require('../models/OrderItem');
+    const hasOrderItems = await OrderItem.findOne({ where: { product_id: id } });
+    if (hasOrderItems) {
+      return res.status(400).json({
+        success: false,
+        message: "This product cannot be deleted because it has existing orders. Please archive or deactivate it instead."
+      });
     }
 
     await product.destroy();
