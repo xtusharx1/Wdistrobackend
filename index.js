@@ -11,6 +11,7 @@ process.on('exit', (code) => {
 
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const fs = require('fs');
 const path = require('path');
 const sequelize = require('./config/db');
@@ -23,9 +24,11 @@ const productRoutes = require('./routes/productRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const invoiceRoutes = require('./routes/invoiceRoutes');
 const salesRoutes = require('./routes/salesRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 
 const app = express();
 
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
@@ -44,6 +47,7 @@ app.use('/products', productRoutes);
 app.use('/orders', orderRoutes);
 app.use('/invoices', invoiceRoutes);
 app.use('/sales', salesRoutes);
+app.use('/dashboard', dashboardRoutes);
 
 const PORT = process.env.PORT || 3000;
 

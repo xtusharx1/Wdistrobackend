@@ -24,7 +24,11 @@ const SalesExecutiveAssignment = sequelize.define('SalesExecutiveAssignment', {
   start_date: { type: DataTypes.DATE, allowNull: false },
   end_date: { type: DataTypes.DATE, allowNull: true }
 }, {
-  timestamps: false
+  timestamps: false,
+  indexes: [
+    { fields: ['sales_exec_id'] },
+    { fields: ['shop_id'] }
+  ]
 });
 
 module.exports = SalesExecutiveAssignment;

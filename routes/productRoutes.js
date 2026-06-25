@@ -206,7 +206,7 @@ router.post('/bulk', async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
@@ -222,6 +222,12 @@ router.get('/', async (req, res) => {
     const subCat = sub_category || subCategory;
     if (subCat && subCat !== 'All') {
       whereClause.sub_category = subCat;
+    }
+
+    if (stockFilter === 'low_stock') {
+      whereClause.stock_quantity = { [Op.gt]: 0, [Op.lt]: 10 };
+    } else if (stockFilter === 'out_of_stock') {
+      whereClause.stock_quantity = 0;
     }
 
     if (shopId) {

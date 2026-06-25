@@ -26,7 +26,11 @@ const OrderItem = sequelize.define('OrderItem', {
   price: { type: DataTypes.FLOAT, allowNull: false },
   custom_price: { type: DataTypes.FLOAT, allowNull: true }
 }, {
-  timestamps: false
+  timestamps: false,
+  indexes: [
+    { fields: ['order_id'] },
+    { fields: ['product_id'] }
+  ]
 });
 
 module.exports = OrderItem;

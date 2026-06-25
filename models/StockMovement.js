@@ -29,7 +29,11 @@ const StockMovement = sequelize.define('StockMovement', {
 }, {
   timestamps: true,
   createdAt: 'created_at',
-  updatedAt: false
+  updatedAt: false,
+  indexes: [
+    { fields: ['product_id'] },
+    { fields: ['order_id'] }
+  ]
 });
 
 module.exports = StockMovement;

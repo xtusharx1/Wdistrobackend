@@ -17,7 +17,12 @@ const Product = sequelize.define('Product', {
 }, {
   timestamps: true,
   createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  updatedAt: 'updated_at',
+  indexes: [
+    { fields: ['main_category'] },
+    { fields: ['sub_category'] },
+    { fields: ['sku_id'] }
+  ]
 });
 
 module.exports = Product;

@@ -133,27 +133,31 @@ router.get('/incentives', async (req, res) => {
       ]
     });
 
+    if (assignments.length === 0) {
+      return res.json({ success: true, message: 'Sales performance fetched successfully', data: { performance: [] } });
+    }
+
+    const shopIds = assignments.map(a => a.shop_id);
+    const allOrders = await Order.findAll({
+      where: {
+        shop_id: shopIds,
+        status: { [Op.ne]: 'pending' }
+      },
+      order: [['created_at', 'DESC']]
+    });
+
     const performanceData = [];
 
     for (const assignment of assignments) {
-      const orderWhere = {
-        shop_id: assignment.shop_id,
-        status: { [Op.ne]: 'pending' },
-        created_at: {
-          [Op.gte]: assignment.start_date
-        }
-      };
-      
-      if (assignment.end_date) {
-        orderWhere.created_at[Op.lte] = assignment.end_date;
-      }
-      
-      const orders = await Order.findAll({
-        where: orderWhere,
-        order: [['created_at', 'DESC']]
+      const shopOrders = allOrders.filter(order => {
+        if (order.shop_id !== assignment.shop_id) return false;
+        const orderDate = new Date(order.created_at);
+        if (orderDate < new Date(assignment.start_date)) return false;
+        if (assignment.end_date && orderDate > new Date(assignment.end_date)) return false;
+        return true;
       });
 
-      for (const order of orders) {
+      for (const order of shopOrders) {
         performanceData.push({
           sales_exec: {
             id: assignment.SalesExecutive?.id,

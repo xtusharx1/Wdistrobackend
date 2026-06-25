@@ -17,7 +17,10 @@ const Invoice = sequelize.define('Invoice', {
   generated_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, allowNull: false },
   pdf_url: { type: DataTypes.STRING, allowNull: true }
 }, {
-  timestamps: false
+  timestamps: false,
+  indexes: [
+    { fields: ['order_id'] }
+  ]
 });
 
 module.exports = Invoice;

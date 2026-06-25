@@ -80,10 +80,17 @@ router.get('/', async (req, res) => {
       include: [
         {
           model: OrderItem,
-          include: [Product]
+          attributes: ['id', 'order_id', 'product_id', 'requested_qty', 'approved_qty', 'price', 'custom_price'],
+          include: [
+            {
+              model: Product,
+              attributes: ['id', 'name', 'price', 'sku_id', 'image_url']
+            }
+          ]
         },
         {
-          model: Invoice
+          model: Invoice,
+          attributes: ['id', 'order_id', 'final_amount', 'shipping_charge', 'generated_at', 'pdf_url']
         }
       ],
       order: [['created_at', 'DESC']]
@@ -120,7 +127,11 @@ router.get('/:id', async (req, res) => {
     const order = await Order.findByPk(id, {
       include: [{
         model: OrderItem,
-        include: [Product]
+        attributes: ['id', 'order_id', 'product_id', 'requested_qty', 'approved_qty', 'price', 'custom_price'],
+        include: [{
+          model: Product,
+          attributes: ['id', 'name', 'price', 'sku_id', 'image_url']
+        }]
       }]
     });
     if (!order) {
