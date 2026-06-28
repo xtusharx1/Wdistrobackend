@@ -178,7 +178,7 @@ router.get('/', async (req, res) => {
         },
         {
           model: Invoice,
-          attributes: ['id', 'order_id', 'final_amount', 'shipping_charge', 'generated_at', 'pdf_url']
+          attributes: ['id', 'order_id', 'final_amount', 'generated_at', 'pdf_url']
         }
       ],
       order: [['created_at', 'DESC']]
@@ -338,7 +338,6 @@ router.patch('/:id/process', async (req, res) => {
       await Invoice.create({
         order_id: updatedOrder.id,
         final_amount: updatedOrder.total_amount,
-        shipping_charge: 0,
         generated_at: new Date(),
         pdf_url: pdfUrl
       });
@@ -472,7 +471,6 @@ router.patch('/:id/status', async (req, res) => {
         await Invoice.create({
           order_id: order.id,
           final_amount: order.total_amount,
-          shipping_charge: 0,
           generated_at: now,
           pdf_url: pdfUrl
         });
@@ -617,7 +615,6 @@ router.put('/:id/approve', async (req, res) => {
       await Invoice.create({
         order_id: updatedOrder.id,
         final_amount: updatedOrder.total_amount,
-        shipping_charge: 0,
         generated_at: new Date(),
         pdf_url: pdfUrl
       });

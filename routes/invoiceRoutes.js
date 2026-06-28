@@ -119,13 +119,11 @@ router.post('/:orderId/generate', async (req, res) => {
       invoice = await Invoice.create({
         order_id: order.id,
         final_amount: finalAmount,
-        shipping_charge: 0,
         generated_at: new Date(),
         pdf_url: pdfUrl
       });
     } else {
       invoice.final_amount = finalAmount;
-      invoice.shipping_charge = 0;
       invoice.pdf_url = pdfUrl;
       invoice.generated_at = new Date();
       await invoice.save();
@@ -179,7 +177,6 @@ router.post('/:invoiceId/regenerate', async (req, res) => {
     }
 
     invoice.final_amount = order.total_amount;
-    invoice.shipping_charge = 0;
     invoice.pdf_url = pdfUrl;
     invoice.generated_at = new Date();
     await invoice.save();

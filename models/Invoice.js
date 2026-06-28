@@ -13,7 +13,6 @@ const Invoice = sequelize.define('Invoice', {
     allowNull: false
   },
   final_amount: { type: DataTypes.FLOAT, allowNull: false },
-  shipping_charge: { type: DataTypes.FLOAT, defaultValue: 0.0, allowNull: false },
   generated_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, allowNull: false },
   pdf_url: { type: DataTypes.STRING, allowNull: true }
 }, {
