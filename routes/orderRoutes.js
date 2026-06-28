@@ -7,14 +7,85 @@ const Shop = require('../models/Shop');
 const { uploadInvoicePDF } = require('../services/pdfService');
 const sequelize = require('../config/db');
 const StockMovement = require('../models/StockMovement');
+const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 
 const router = express.Router();
+
+// Helper to check order access across roles/shops
+const checkOrderAccess = async (orderId, headers) => {
+  const shopId = headers['x-shop-id'];
+  const userRole = headers['x-user-role'];
+  const userId = headers['x-user-id'];
+
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    return { hasAccess: false, status: 404, message: 'Order not found' };
+  }
+
+  // 1. If customer (shop)
+  if (shopId) {
+    if (String(order.shop_id) !== String(shopId)) {
+      return { hasAccess: false, status: 403, message: 'Access denied: This order does not belong to your shop' };
+    }
+    return { hasAccess: true, order };
+  }
+
+  // 2. If platform user
+  if (userRole) {
+    if (userRole === 'Admin' || userRole === 'Seller') {
+      return { hasAccess: true, order };
+    }
+
+    if (userRole === 'Sales Executive') {
+      if (!userId) {
+        return { hasAccess: false, status: 403, message: 'Access denied: User ID is required' };
+      }
+      const assignment = await SalesExecutiveAssignment.findOne({
+        where: { sales_exec_id: userId, shop_id: order.shop_id, end_date: null }
+      });
+      if (!assignment) {
+        return { hasAccess: false, status: 403, message: 'Access denied: You are not assigned to this shop' };
+      }
+      return { hasAccess: true, order };
+    }
+  }
+
+  // Default: Deny access if no credentials are provided
+  return { hasAccess: false, status: 401, message: 'Unauthorized: Access credentials missing' };
+};
 
 // Create order
 router.post('/', async (req, res) => {
   const { shop_id, total_amount, items } = req.body;
+  const shopIdHeader = req.headers['x-shop-id'];
+  const userRole = req.headers['x-user-role'];
+  const userId = req.headers['x-user-id'];
+
   if (!shop_id || total_amount === undefined || !items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ success: false, message: 'Invalid order data' });
+  }
+
+  // Enforce order creation authorization
+  if (shopIdHeader) {
+    if (String(shop_id) !== String(shopIdHeader)) {
+      return res.status(403).json({ success: false, message: 'Access denied: Cannot create order for another shop' });
+    }
+  } else if (userRole) {
+    if (userRole === 'Sales Executive') {
+      if (!userId) {
+        return res.status(403).json({ success: false, message: 'Access denied: User ID is required' });
+      }
+      const assignment = await SalesExecutiveAssignment.findOne({
+        where: { sales_exec_id: userId, shop_id, end_date: null }
+      });
+      if (!assignment) {
+        return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+      }
+    } else if (userRole !== 'Admin' && userRole !== 'Seller') {
+      return res.status(403).json({ success: false, message: 'Access denied: Invalid user role' });
+    }
+  } else {
+    return res.status(401).json({ success: false, message: 'Unauthorized: Access credentials missing' });
   }
 
   try {
@@ -58,21 +129,38 @@ router.post('/', async (req, res) => {
   }
 });
 
-const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
-
 // Get orders
 router.get('/', async (req, res) => {
+  const shopId = req.headers['x-shop-id'];
   const userRole = req.headers['x-user-role'];
   const userId = req.headers['x-user-id'];
 
   try {
     let whereClause = {};
-    if (userRole === 'Sales Executive') {
-      const assignments = await SalesExecutiveAssignment.findAll({
-        where: { sales_exec_id: userId, end_date: null }
-      });
-      const shopIds = assignments.map(a => a.shop_id);
-      whereClause = { shop_id: shopIds };
+
+    if (shopId) {
+      // 1. If it's a shop (buyer), only return orders belonging to that shop
+      whereClause = { shop_id: shopId };
+    } else if (userRole) {
+      // 2. If it's a platform user
+      if (userRole === 'Admin' || userRole === 'Seller') {
+        // Admin and Seller can see all orders
+        whereClause = {};
+      } else if (userRole === 'Sales Executive') {
+        if (!userId) {
+          return res.status(403).json({ success: false, message: 'Access denied: User ID is required' });
+        }
+        const assignments = await SalesExecutiveAssignment.findAll({
+          where: { sales_exec_id: userId, end_date: null }
+        });
+        const shopIds = assignments.map(a => a.shop_id);
+        whereClause = { shop_id: shopIds };
+      } else {
+        return res.status(403).json({ success: false, message: 'Access denied: Invalid user role' });
+      }
+    } else {
+      // Neither x-shop-id nor x-user-role is provided
+      return res.status(401).json({ success: false, message: 'Unauthorized: Access credentials missing' });
     }
 
     const orders = await Order.findAll({
@@ -102,26 +190,14 @@ router.get('/', async (req, res) => {
   }
 });
 
-const checkSalesExecutiveAccess = async (orderId, userId, userRole) => {
-  if (userRole !== 'Sales Executive') return true;
-  const order = await Order.findByPk(orderId);
-  if (!order) return true; // Let main handler return 404
-  const assignment = await SalesExecutiveAssignment.findOne({
-    where: { sales_exec_id: userId, shop_id: order.shop_id, end_date: null }
-  });
-  return !!assignment;
-};
-
 // Get order by ID
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
-  const userRole = req.headers['x-user-role'];
-  const userId = req.headers['x-user-id'];
 
   try {
-    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    const access = await checkOrderAccess(id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
     }
 
     const order = await Order.findByPk(id, {
@@ -134,9 +210,6 @@ router.get('/:id', async (req, res) => {
         }]
       }]
     });
-    if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
-    }
     return res.json({ success: true, message: 'Order fetched successfully', data: { order } });
   } catch (err) {
     console.error('Error fetching order:', err);
@@ -148,17 +221,20 @@ router.get('/:id', async (req, res) => {
 router.patch('/:id/process', async (req, res) => {
   const { id } = req.params;
   const { items } = req.body; // Array of { id: order_item_id, approved_qty: number }
-  const userRole = req.headers['x-user-role'];
-  const userId = req.headers['x-user-id'];
 
   if (!items || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'items array is required to process order' });
   }
 
   try {
-    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    const userRole = req.headers['x-user-role'];
+    if (!userRole) {
+      return res.status(403).json({ success: false, message: 'Access denied: Administrative privileges required' });
+    }
+
+    const access = await checkOrderAccess(id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
     }
 
     const order = await Order.findByPk(id, { include: [OrderItem] });
@@ -213,6 +289,9 @@ router.patch('/:id/process', async (req, res) => {
 
           const prevStock = product.stock_quantity;
           product.stock_quantity -= updateItem.approved_qty;
+          if (product.stock_quantity === 0) {
+            product.is_active = false;
+          }
           await product.save({ transaction: t });
 
           // Log StockMovement
@@ -279,8 +358,6 @@ router.patch('/:id/process', async (req, res) => {
 router.patch('/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-  const userRole = req.headers['x-user-role'];
-  const userId = req.headers['x-user-id'];
 
   const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed', 'cancelled'];
   if (!status || !validStatuses.includes(status)) {
@@ -288,12 +365,17 @@ router.patch('/:id/status', async (req, res) => {
   }
 
   try {
-    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    const userRole = req.headers['x-user-role'];
+    if (!userRole) {
+      return res.status(403).json({ success: false, message: 'Access denied: Administrative privileges required' });
     }
 
-    const order = await Order.findByPk(id);
+    const access = await checkOrderAccess(id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const order = access.order;
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
@@ -321,6 +403,9 @@ router.patch('/:id/status', async (req, res) => {
               if (product) {
                 const prevStock = product.stock_quantity;
                 product.stock_quantity += item.approved_qty;
+                if (product.stock_quantity > 0) {
+                  product.is_active = true;
+                }
                 await product.save({ transaction: t });
 
                 // Log StockMovement
@@ -415,17 +500,20 @@ router.patch('/:id/status', async (req, res) => {
 router.put('/:id/approve', async (req, res) => {
   const { id } = req.params;
   const { items } = req.body; // Array of { id: order_item_id, approved_qty: number }
-  const userRole = req.headers['x-user-role'];
-  const userId = req.headers['x-user-id'];
 
   if (!items || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'items array is required to approve order' });
   }
 
   try {
-    const hasAccess = await checkSalesExecutiveAccess(id, userId, userRole);
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: 'Access denied: You are not assigned to this shop' });
+    const userRole = req.headers['x-user-role'];
+    if (!userRole) {
+      return res.status(403).json({ success: false, message: 'Access denied: Administrative privileges required' });
+    }
+
+    const access = await checkOrderAccess(id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
     }
 
     const order = await Order.findByPk(id, { include: [OrderItem] });
@@ -480,6 +568,9 @@ router.put('/:id/approve', async (req, res) => {
 
           const prevStock = product.stock_quantity;
           product.stock_quantity -= updateItem.approved_qty;
+          if (product.stock_quantity === 0) {
+            product.is_active = false;
+          }
           await product.save({ transaction: t });
 
           // Log StockMovement

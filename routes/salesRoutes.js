@@ -42,6 +42,16 @@ router.post('/assignments', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Shop not found' });
     }
 
+    // Check if the shop already has an active sales agent assignment
+    const existingActive = await SalesExecutiveAssignment.findOne({
+      where: { shop_id, end_date: null }
+    });
+    if (existingActive) {
+      // Deactivate/end the old assignment by setting its end_date to start_date
+      existingActive.end_date = start_date;
+      await existingActive.save();
+    }
+
     const assignment = await SalesExecutiveAssignment.create({ sales_exec_id, shop_id, start_date });
     const full = await SalesExecutiveAssignment.findByPk(assignment.id, {
       include: [
@@ -65,6 +75,25 @@ router.patch('/assignments/:id', async (req, res) => {
     }
 
     const { end_date, start_date, sales_exec_id, shop_id } = req.body;
+
+    const targetShopId = shop_id !== undefined ? shop_id : assignment.shop_id;
+    const targetEndDate = end_date !== undefined ? end_date : assignment.end_date;
+
+    // Check active store assignment constraint if the assignment is active
+    if (targetEndDate === null || targetEndDate === '') {
+      const existingActive = await SalesExecutiveAssignment.findOne({
+        where: {
+          shop_id: targetShopId,
+          end_date: null,
+          id: { [Op.ne]: assignment.id }
+        }
+      });
+      if (existingActive) {
+        // Deactivate/end the old active assignment
+        existingActive.end_date = start_date || new Date().toISOString().split('T')[0];
+        await existingActive.save();
+      }
+    }
     
     if (sales_exec_id !== undefined) {
       const exec = await User.findOne({ where: { id: sales_exec_id, role: 'Sales Executive' } });
@@ -82,7 +111,9 @@ router.patch('/assignments/:id', async (req, res) => {
       assignment.shop_id = shop_id;
     }
 
-    if (end_date !== undefined) assignment.end_date = end_date;
+    if (end_date !== undefined) {
+      assignment.end_date = end_date === '' ? null : end_date;
+    }
     if (start_date !== undefined) assignment.start_date = start_date;
     await assignment.save();
 

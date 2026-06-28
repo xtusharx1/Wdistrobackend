@@ -102,6 +102,189 @@ const getLevenshteinSimilarity = (str1, str2) => {
   return (maxLength - dist) / maxLength;
 };
 
+const CATEGORY_MAP = {
+  'General Merchandise': ['Cables', 'Toys', 'Misc', 'Clothing', 'Supplements', 'Medicine (OTC)'],
+  'Glass': ['Glass Rigs', 'Glass Accessories', 'Grinders'],
+  'Tobacco': ['Wraps', 'Cigars', 'Cigarillos', 'Rolling Tobacco', 'Chew/Pouches'],
+  'Lighters': ['Pocket Torches', 'High Flame', 'Butane', 'Torch Lighters'],
+  'Vape': ['Disposable', 'Hardware', 'Vape Accessories', 'Juices'],
+  'Rolling Papers': ['Papers', 'Rolling Machine', 'Tips', 'Cones']
+};
+
+const mapCategoryFromText = (name, desc, mainCatInput, subCatInput) => {
+  const text = `${name || ''} ${desc || ''} ${mainCatInput || ''} ${subCatInput || ''}`.toLowerCase();
+  
+  if (/\b(gummy|gummies|kanna|kratom|gumm)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Supplements' };
+  }
+  if (/\b(energy|energy\s*drink|5\s*hour|5-hour)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Supplements' };
+  }
+  if (/\b(liquid\s*gel|liquid\s*gels|gel\s*cap|gel\s*caps|capsule|capsules|tablet|tablets)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Medicine (OTC)' };
+  }
+  
+  // Vape matching
+  if (/\b(disposable|disposables|geek\s*bar|lost\s*mary|elf\s*bar|vuse|flum|fume|hqd|breeze|mr\s*fog|puff\s*bar|packspod|ebdesign|raz|viho|kadobar|oxbar|vaping)\b/.test(text)) {
+    return { mainCat: 'Vape', subCat: 'Disposable' };
+  }
+  if (/\b(juice|juices|liquid|e-liquid|eliquid|e-juice|ejuice|salt\s*nic|nic\s*salt|pod\s*juice)\b/.test(text)) {
+    return { mainCat: 'Vape', subCat: 'Juices' };
+  }
+  if (/\b(coil|coils|empty\s*pod|empty\s*pods|cartridge|cartridges)\b/.test(text)) {
+    return { mainCat: 'Vape', subCat: 'Vape Accessories' };
+  }
+  if (/\b(mod|vape\s*kit|starter\s*kit|vape\s*device|battery|vaporizer|tanks)\b/.test(text) || /\bvape\b/.test(text)) {
+    return { mainCat: 'Vape', subCat: 'Hardware' };
+  }
+
+  // Tobacco matching
+  if (/\b(wrap|wraps|hemp\s*wrap|hemp\s*wraps|fronto|grabba|loose\s*leaf|king\s*palm|zig\s*zag\s*wrap)\b/.test(text)) {
+    return { mainCat: 'Tobacco', subCat: 'Wraps' };
+  }
+  if (/\b(cigarillo|cigarillos|swisher|white\s*owl|dutch\s*masters|game\s*cigar)\b/.test(text)) {
+    return { mainCat: 'Tobacco', subCat: 'Cigarillos' };
+  }
+  if (/\b(cigar|cigars)\b/.test(text)) {
+    return { mainCat: 'Tobacco', subCat: 'Cigars' };
+  }
+  if (/\b(rolling\s*tobacco|pipe\s*tobacco|loose\s*tobacco)\b/.test(text)) {
+    return { mainCat: 'Tobacco', subCat: 'Rolling Tobacco' };
+  }
+  if (/\b(chew|chews|pouch|pouches|snus|dip|snuff|zyn|velo|rogue)\b/.test(text) || /\btobacco\b/.test(text)) {
+    return { mainCat: 'Tobacco', subCat: 'Chew/Pouches' };
+  }
+
+  // Rolling Papers matching
+  if (/\b(cone|cones|raw\s*cone|raw\s*cones|pre-rolled\s*cone)\b/.test(text)) {
+    return { mainCat: 'Rolling Papers', subCat: 'Cones' };
+  }
+  if (/\b(tip|tips|filter\s*tip|filter\s*tips|crutch|crutches)\b/.test(text)) {
+    return { mainCat: 'Rolling Papers', subCat: 'Tips' };
+  }
+  if (/\b(roller|rolling\s*machine|rolling\s*machines|joint\s*roller)\b/.test(text)) {
+    return { mainCat: 'Rolling Papers', subCat: 'Rolling Machine' };
+  }
+  if (/\b(paper|papers|rolling\s*paper|rolling\s*papers|raw|elements|ocb|zig\s*zag)\b/.test(text)) {
+    return { mainCat: 'Rolling Papers', subCat: 'Papers' };
+  }
+
+  // Glass matching
+  if (/\b(rig|rigs|dab\s*rig|bong|bongs|waterpipe|waterpipes|water\s*pipe|bubbler|recycler)\b/.test(text)) {
+    return { mainCat: 'Glass', subCat: 'Glass Rigs' };
+  }
+  if (/\b(bowl|bowls|slide|banger|bangers|downstem|downstems|ash\s*catcher|carb\s*cap|glass\s*screen|glass\s*pipe|glass\s*pipes|spoon\s*pipe|hand\s*pipe)\b/.test(text)) {
+    return { mainCat: 'Glass', subCat: 'Glass Accessories' };
+  }
+  if (/\b(grinder|grinders)\b/.test(text) || /\bglass\b/.test(text)) {
+    return { mainCat: 'Glass', subCat: 'Grinders' };
+  }
+
+  // Lighters matching
+  if (/\b(butane|butane\s*gas|refill)\b/.test(text)) {
+    return { mainCat: 'Lighters', subCat: 'Butane' };
+  }
+  if (/\b(pocket\s*torch|mini\s*torch)\b/.test(text)) {
+    return { mainCat: 'Lighters', subCat: 'Pocket Torches' };
+  }
+  if (/\b(high\s*flame|blowtorch)\b/.test(text)) {
+    return { mainCat: 'Lighters', subCat: 'High Flame' };
+  }
+  if (/\b(torch\s*lighter|torch\s*lighters)\b/.test(text)) {
+    return { mainCat: 'Lighters', subCat: 'Torch Lighters' };
+  }
+  if (/\b(lighter|lighters|clipper|bic|zippo)\b/.test(text)) {
+    return { mainCat: 'Lighters', subCat: 'Pocket Torches' };
+  }
+
+  // General Merchandise matching
+  if (/\b(cable|cables|charger|chargers|usb|type-c|lightning\s*cable|charging\s*cord)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Cables' };
+  }
+  if (/\b(toy|toys|plush|novelty)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Toys' };
+  }
+  if (/\b(clothing|t-shirt|tshirt|hoodie|cap|hat|socks|apparel)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Clothing' };
+  }
+  if (/\b(supplement|supplements|cbd|gummy|gummi|kratom|kava|nootropic|vitamins)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Supplements' };
+  }
+  if (/\b(medicine|otc|advil|tylenol|aspirin|ibuprofen|pain\s*relief|allergy)\b/.test(text)) {
+    return { mainCat: 'General Merchandise', subCat: 'Medicine (OTC)' };
+  }
+
+  return { mainCat: 'General Merchandise', subCat: 'Misc' };
+};
+
+const resolveCategories = (name, description, mainCategory, subCategory) => {
+  let mainCat = 'General Merchandise';
+  let subCat = 'Misc';
+  
+  if (mainCategory) {
+    const cleanedMain = String(mainCategory).trim().toLowerCase();
+    const matchedKey = Object.keys(CATEGORY_MAP).find(
+      (key) => key.toLowerCase() === cleanedMain
+    );
+    if (matchedKey) {
+      mainCat = matchedKey;
+      subCat = CATEGORY_MAP[matchedKey][0] || 'Misc';
+      
+      if (subCategory) {
+        const cleanedSub = String(subCategory).trim().toLowerCase();
+        const matchedSub = CATEGORY_MAP[matchedKey].find(
+          (sub) => sub.toLowerCase() === cleanedSub
+        );
+        if (matchedSub) {
+          subCat = matchedSub;
+        } else {
+          subCat = String(subCategory).trim();
+        }
+      } else {
+        const detected = mapCategoryFromText(name, description, mainCategory, subCategory);
+        if (detected.mainCat === matchedKey) {
+          subCat = detected.subCat;
+        }
+      }
+    } else {
+      let foundMatch = false;
+      for (const [key, subs] of Object.entries(CATEGORY_MAP)) {
+        const matchedSub = subs.find(sub => sub.toLowerCase() === cleanedMain);
+        if (matchedSub) {
+          mainCat = key;
+          subCat = matchedSub;
+          foundMatch = true;
+          break;
+        }
+      }
+      if (!foundMatch) {
+        const detected = mapCategoryFromText(name, description, mainCategory, subCategory);
+        if (detected.mainCat !== 'General Merchandise' || detected.subCat !== 'Misc') {
+          mainCat = detected.mainCat;
+          subCat = detected.subCat;
+        } else {
+          mainCat = String(mainCategory).trim();
+          subCat = subCategory ? String(subCategory).trim() : 'Misc';
+        }
+      }
+    }
+  } else {
+    const detected = mapCategoryFromText(name, description, mainCategory, subCategory);
+    mainCat = detected.mainCat;
+    subCat = detected.subCat;
+  }
+  
+  if (mainCat === 'General Merchandise' && subCat === 'Misc') {
+    const detected = mapCategoryFromText(name, description, mainCategory, subCategory);
+    if (detected.mainCat !== 'General Merchandise' || detected.subCat !== 'Misc') {
+      mainCat = detected.mainCat;
+      subCat = detected.subCat;
+    }
+  }
+  
+  return { mainCat, subCat };
+};
+
 // Create product
 router.post('/', async (req, res) => {
   const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck } = req.body;
@@ -109,8 +292,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
 
-  const mainCat = mainCategory || main_category || 'General Merchandise';
-  const subCat = subCategory || sub_category || 'Misc';
+  const { mainCat, subCat } = resolveCategories(name, description, mainCategory || main_category, subCategory || sub_category || category);
   const reqLicense = requiredLicense || required_license || ((mainCat === 'Tobacco' || mainCat === 'Vape') ? 'Tobacco License' : 'Seller Permit');
 
   try {
@@ -145,6 +327,7 @@ router.post('/', async (req, res) => {
       sub_category: subCat,
       required_license: reqLicense,
       stock_quantity,
+      is_active: is_active !== undefined ? is_active : (stock_quantity > 0),
       image_url,
       sku_id,
       description
@@ -178,8 +361,7 @@ router.post('/bulk', async (req, res) => {
   try {
     const createdProducts = await Product.bulkCreate(
       productsInput.map(p => {
-        const mainCat = p.mainCategory || p.main_category || 'General Merchandise';
-        const subCat = p.subCategory || p.sub_category || 'Misc';
+        const { mainCat, subCat } = resolveCategories(p.name, p.description, p.mainCategory || p.main_category, p.subCategory || p.sub_category || p.category);
         const reqLicense = p.requiredLicense || p.required_license || ((mainCat === 'Tobacco' || mainCat === 'Vape') ? 'Tobacco License' : 'Seller Permit');
         return {
           name: p.name,
@@ -191,6 +373,7 @@ router.post('/bulk', async (req, res) => {
           sub_category: subCat,
           required_license: reqLicense,
           stock_quantity: p.stock_quantity,
+          is_active: p.is_active !== undefined ? p.is_active : (p.stock_quantity > 0),
           image_url: p.image_url || null,
           description: p.description || null
         };
@@ -378,7 +561,12 @@ router.patch('/:id', async (req, res) => {
       product.required_license = requiredLicense || required_license;
     }
 
-    if (stock_quantity !== undefined) product.stock_quantity = stock_quantity;
+    if (stock_quantity !== undefined) {
+      product.stock_quantity = stock_quantity;
+      if (is_active === undefined) {
+        product.is_active = stock_quantity > 0;
+      }
+    }
     if (image_url !== undefined) product.image_url = image_url;
     if (description !== undefined) product.description = description;
 
@@ -406,6 +594,7 @@ router.patch('/:id/stock', async (req, res) => {
     }
 
     product.stock_quantity = stock_quantity;
+    product.is_active = stock_quantity > 0;
     await product.save();
     return res.json({ success: true, message: 'Product stock updated successfully', data: { product } });
   } catch (err) {
