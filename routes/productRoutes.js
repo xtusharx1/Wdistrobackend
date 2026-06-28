@@ -287,7 +287,7 @@ const resolveCategories = (name, description, mainCategory, subCategory) => {
 
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active } = req.body;
   if (!name || price === undefined || stock_quantity === undefined) {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
