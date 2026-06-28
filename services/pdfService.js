@@ -117,24 +117,30 @@ const generateInvoicePDFBuffer = (order, shop) => {
       const discount = originalPrice - finalPrice;
       const total = finalPrice * appQty;
       
+      // Calculate dynamic row height based on wrapped name string height
+      const textHeight = doc.heightOfString(name, { width: 150 });
+      const rowHeight = Math.max(22, textHeight + 10);
+      
       // Zebra striping
       doc.fillColor(index % 2 === 0 ? '#f8fafc' : '#ffffff');
-      doc.rect(50, position, 512, 22).fill();
+      doc.rect(50, position, 512, rowHeight).fill();
       
       // Text drawing
       doc.fillColor('#1e293b');
-      doc.text(name, 60, position + 7, { width: 150, ellipsis: true });
-      doc.text(skuId, 215, position + 7, { width: 65, ellipsis: true });
-      doc.text(String(appQty), 285, position + 7, { width: 25, align: 'right' });
-      doc.text(`$${originalPrice.toFixed(2)}`, 315, position + 7, { width: 55, align: 'right' });
-      doc.text(`$${discount.toFixed(2)}`, 375, position + 7, { width: 55, align: 'right' });
-      doc.text(`$${finalPrice.toFixed(2)}`, 435, position + 7, { width: 60, align: 'right' });
-      doc.text(`$${total.toFixed(2)}`, 500, position + 7, { width: 55, align: 'right' });
+      doc.text(name, 60, position + (rowHeight - textHeight) / 2, { width: 150 });
+      
+      const valOffset = position + (rowHeight - 9) / 2;
+      doc.text(skuId, 215, valOffset, { width: 65 });
+      doc.text(String(appQty), 285, valOffset, { width: 25, align: 'right' });
+      doc.text(`$${originalPrice.toFixed(2)}`, 315, valOffset, { width: 55, align: 'right' });
+      doc.text(`$${discount.toFixed(2)}`, 375, valOffset, { width: 55, align: 'right' });
+      doc.text(`$${finalPrice.toFixed(2)}`, 435, valOffset, { width: 60, align: 'right' });
+      doc.text(`$${total.toFixed(2)}`, 500, valOffset, { width: 55, align: 'right' });
       
       // Underline border
-      doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(50, position + 22).lineTo(562, position + 22).stroke();
+      doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(50, position + rowHeight).lineTo(562, position + rowHeight).stroke();
       
-      position += 22;
+      position += rowHeight;
     });
 
     // 8. Totals Section
