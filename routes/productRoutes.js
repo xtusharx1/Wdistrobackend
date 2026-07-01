@@ -288,7 +288,7 @@ const resolveCategories = (name, description, mainCategory, subCategory) => {
 
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active, is_clearance, clearance_price, is_featured, featured_order } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active, is_clearance, clearance_price, is_featured } = req.body;
   if (!name || price === undefined || stock_quantity === undefined) {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
@@ -349,8 +349,7 @@ router.post('/', async (req, res) => {
       description,
       is_clearance: isClearance,
       clearance_price: parsedClearancePrice,
-      is_featured: is_featured === true || is_featured === 'true',
-      featured_order: featured_order !== undefined && featured_order !== null ? parseInt(featured_order) : null
+      is_featured: is_featured === true || is_featured === 'true'
     });
     return res.status(201).json({ success: true, message: 'Product created successfully', data: { product } });
   } catch (err) {
@@ -585,7 +584,6 @@ router.get('/featured', async (req, res) => {
     const products = await Product.findAll({
       where: whereClause,
       order: [
-        ['featured_order', 'ASC'],
         ['created_at', 'DESC'],
         ['id', 'DESC'],
       ]
@@ -675,7 +673,7 @@ router.get('/:id', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active, is_clearance, clearance_price, is_featured, featured_order } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active, is_clearance, clearance_price, is_featured } = req.body;
 
   try {
     const product = await Product.findByPk(id);
@@ -729,7 +727,6 @@ router.patch('/:id', async (req, res) => {
     }
 
     if (is_featured !== undefined) product.is_featured = is_featured === true || is_featured === 'true';
-    if (featured_order !== undefined) product.featured_order = featured_order !== null ? parseInt(featured_order) : null;
 
     // Validate final clearance state before saving
     if (product.is_clearance) {
