@@ -54,8 +54,8 @@ const permitUpload = multer({
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const allowedExts = ['.pdf', '.jpg', '.jpeg', '.png'];
-    const allowedMimes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
-    if (allowedExts.includes(ext) && allowedMimes.includes(file.mimetype)) {
+    const allowedMimes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'application/octet-stream'];
+    if (allowedExts.includes(ext) && (allowedMimes.includes(file.mimetype) || !file.mimetype)) {
       return cb(null, true);
     }
     cb(new Error('Only PDF, JPG, JPEG, PNG files are allowed'));

@@ -9,6 +9,7 @@ const sequelize = require('../config/db');
 const StockMovement = require('../models/StockMovement');
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const OrderEditLog = require('../models/OrderEditLog');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -684,7 +685,7 @@ router.put('/:id/edit', async (req, res) => {
         where: { order_id: order.id },
         include: [{ model: Product }],
         transaction: t,
-        lock: t.LOCK.UPDATE
+        lock: { level: t.LOCK.UPDATE, of: OrderItem }
       });
 
       const oldItemMap = new Map(oldItems.map(item => [item.product_id, item]));
@@ -955,6 +956,26 @@ router.put('/:id/edit', async (req, res) => {
     if (err.statusCode) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
     }
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// GET /orders/:id/logs — edit history for an order
+router.get('/:id/logs', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const order = await Order.findByPk(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+    const logs = await OrderEditLog.findAll({
+      where: { order_id: id },
+      include: [{ model: User, attributes: ['id', 'name', 'role'] }],
+      order: [['created_at', 'DESC']],
+    });
+    return res.json({ success: true, data: { logs } });
+  } catch (err) {
+    console.error('Error fetching order logs:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
