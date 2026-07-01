@@ -55,6 +55,8 @@ Shop.hasMany(ShopPermit, { foreignKey: 'shop_id', as: 'permits' });
 // 10. OrderEditLog associations
 OrderEditLog.belongsTo(Order, { foreignKey: 'order_id' });
 Order.hasMany(OrderEditLog, { foreignKey: 'order_id' });
+OrderEditLog.belongsTo(User, { foreignKey: 'user_id' });
+User.hasMany(OrderEditLog, { foreignKey: 'user_id' });
 
 // 11. DraftOrder associations
 DraftOrder.belongsTo(Shop, { foreignKey: 'shop_id' });
