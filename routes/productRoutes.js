@@ -3,9 +3,10 @@ const multer = require('multer');
 const multerS3 = require('multer-s3');
 const { S3Client } = require('@aws-sdk/client-s3');
 const path = require('path');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const Product = require('../models/Product');
 const Shop = require('../models/Shop');
+const ProductVariationGroup = require('../models/ProductVariationGroup');
 
 const router = express.Router();
 
@@ -287,7 +288,7 @@ const resolveCategories = (name, description, mainCategory, subCategory) => {
 
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active, is_clearance, clearance_price, is_featured, featured_order } = req.body;
   if (!name || price === undefined || stock_quantity === undefined) {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
   }
@@ -318,6 +319,21 @@ router.post('/', async (req, res) => {
       }
     }
 
+    const isClearance = is_clearance === true || is_clearance === 'true';
+    let parsedClearancePrice = null;
+    if (isClearance) {
+      if (clearance_price === undefined || clearance_price === null || clearance_price === '') {
+        return res.status(400).json({ success: false, message: 'Clearance price is required when product is marked as clearance.' });
+      }
+      parsedClearancePrice = parseFloat(clearance_price);
+      if (isNaN(parsedClearancePrice) || parsedClearancePrice <= 0) {
+        return res.status(400).json({ success: false, message: 'Clearance price must be greater than zero.' });
+      }
+      if (parsedClearancePrice >= parseFloat(price)) {
+        return res.status(400).json({ success: false, message: 'Clearance price must be less than the regular selling price.' });
+      }
+    }
+
     const product = await Product.create({
       name,
       price,
@@ -330,7 +346,11 @@ router.post('/', async (req, res) => {
       is_active: is_active !== undefined ? is_active : (stock_quantity > 0),
       image_url,
       sku_id,
-      description
+      description,
+      is_clearance: isClearance,
+      clearance_price: parsedClearancePrice,
+      is_featured: is_featured === true || is_featured === 'true',
+      featured_order: featured_order !== undefined && featured_order !== null ? parseInt(featured_order) : null
     });
     return res.status(201).json({ success: true, message: 'Product created successfully', data: { product } });
   } catch (err) {
@@ -363,6 +383,7 @@ router.post('/bulk', async (req, res) => {
       productsInput.map(p => {
         const { mainCat, subCat } = resolveCategories(p.name, p.description, p.mainCategory || p.main_category, p.subCategory || p.sub_category || p.category);
         const reqLicense = p.requiredLicense || p.required_license || ((mainCat === 'Tobacco' || mainCat === 'Vape') ? 'Tobacco License' : 'Seller Permit');
+        const isClearance = p.is_clearance === true || p.is_clearance === 'true';
         return {
           name: p.name,
           sku_id: p.sku_id || null,
@@ -375,7 +396,9 @@ router.post('/bulk', async (req, res) => {
           stock_quantity: p.stock_quantity,
           is_active: p.is_active !== undefined ? p.is_active : (p.stock_quantity > 0),
           image_url: p.image_url || null,
-          description: p.description || null
+          description: p.description || null,
+          is_clearance: isClearance,
+          clearance_price: isClearance && p.clearance_price !== undefined && p.clearance_price !== null ? parseFloat(p.clearance_price) : null
         };
       })
     );
@@ -389,7 +412,7 @@ router.post('/bulk', async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active, clearance } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
@@ -417,6 +440,13 @@ router.get('/', async (req, res) => {
       whereClause.is_active = true;
     } else if (is_active === 'false' || is_active === false) {
       whereClause.is_active = false;
+    }
+
+    // Clearance filter: ?clearance=true → only clearance, ?clearance=false → only regular
+    if (clearance === 'true') {
+      whereClause.is_clearance = true;
+    } else if (clearance === 'false') {
+      whereClause.is_clearance = false;
     }
 
     if (shopId) {
@@ -491,6 +521,89 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Barcode / QR scan lookup — registered before /:id so 'scan' isn't treated as an id
+// GET /products/scan/:code — searches by sku_id; respects all existing business rules
+router.get('/scan/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  const shopId = req.headers['x-shop-id'];
+  const userRole = req.headers['x-user-role'];
+
+  if (!code) {
+    return res.status(400).json({ success: false, message: 'Scan code is required' });
+  }
+
+  try {
+    const whereClause = { sku_id: code };
+    if (shopId) whereClause.is_active = true; // shop context: active-only
+
+    const product = await Product.findOne({ where: whereClause });
+    if (!product) {
+      return res.status(404).json({ success: false, message: 'No product found for this barcode' });
+    }
+
+    if (shopId) {
+      const shop = await Shop.findByPk(shopId);
+      if (shop) {
+        if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
+          return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
+        }
+        if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
+          return res.status(403).json({ success: false, message: 'Tobacco License Required for this product category.' });
+        }
+      }
+    }
+
+    const p = product.toJSON();
+    if (userRole !== 'Admin') delete p.purchase_cost;
+
+    return res.json({ success: true, message: 'Product fetched successfully', data: { product: p } });
+  } catch (err) {
+    console.error('Error scanning product:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Get featured products — active featured products sorted by featured_order ASC, newest last
+// Must be registered before /:id so Express doesn't treat 'featured' as an id
+router.get('/featured', async (req, res) => {
+  const shopId = req.headers['x-shop-id'];
+  const userRole = req.headers['x-user-role'];
+
+  try {
+    const whereClause = { is_featured: true, is_active: true };
+
+    if (shopId) {
+      const shop = await Shop.findByPk(shopId);
+      if (shop) {
+        const allowedLicenses = [];
+        if (shop.seller_permit && shop.approved) allowedLicenses.push('Seller Permit');
+        if (shop.tobacco_license && shop.approved) allowedLicenses.push('Tobacco License');
+        whereClause.required_license = { [Op.in]: allowedLicenses };
+      }
+    }
+
+    const products = await Product.findAll({
+      where: whereClause,
+      order: [
+        ['featured_order', 'ASC'],
+        ['created_at', 'DESC'],
+        ['id', 'DESC'],
+      ]
+    });
+
+    const sanitized = products.map(p => {
+      const j = p.toJSON();
+      if (userRole !== 'Admin') delete j.purchase_cost;
+      return j;
+    });
+
+    return res.json({ success: true, message: 'Featured products fetched successfully', data: { products: sanitized } });
+  } catch (err) {
+    console.error('Error fetching featured products:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // Get product by ID
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
@@ -520,6 +633,38 @@ router.get('/:id', async (req, res) => {
       delete p.purchase_cost;
     }
 
+    // Attach variation group members (all other products in the same group)
+    const group = await ProductVariationGroup.findOne({
+      where: literal(`${parseInt(id)} = ANY("product_ids")`)
+    });
+
+    let variations = [];
+    if (group) {
+      const variantIds = group.product_ids.filter(pid => pid !== parseInt(id));
+      if (variantIds.length > 0) {
+        const variantWhere = { id: { [Op.in]: variantIds } };
+        if (shopId) {
+          variantWhere.is_active = true;
+          const variantShop = await Shop.findByPk(shopId);
+          if (variantShop) {
+            const allowedLicenses = [];
+            if (variantShop.seller_permit && variantShop.approved) allowedLicenses.push('Seller Permit');
+            if (variantShop.tobacco_license && variantShop.approved) allowedLicenses.push('Tobacco License');
+            variantWhere.required_license = { [Op.in]: allowedLicenses };
+          }
+        }
+        const variantProducts = await Product.findAll({ where: variantWhere });
+        variations = variantProducts.map(vp => {
+          const j = vp.toJSON();
+          if (userRole !== 'Admin') delete j.purchase_cost;
+          return j;
+        });
+      }
+    }
+
+    p.variations = variations;
+    p.variation_group_id = group?.id || null;
+
     return res.json({ success: true, message: 'Product fetched successfully', data: { product: p } });
   } catch (err) {
     console.error('Error fetching product details:', err);
@@ -530,7 +675,7 @@ router.get('/:id', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active, is_clearance, clearance_price, is_featured, featured_order } = req.body;
 
   try {
     const product = await Product.findByPk(id);
@@ -569,6 +714,35 @@ router.patch('/:id', async (req, res) => {
     }
     if (image_url !== undefined) product.image_url = image_url;
     if (description !== undefined) product.description = description;
+
+    // Clearance fields
+    if (is_clearance !== undefined) {
+      const isClearance = is_clearance === true || is_clearance === 'true';
+      product.is_clearance = isClearance;
+      if (!isClearance) {
+        product.clearance_price = null;
+      } else if (clearance_price !== undefined && clearance_price !== null) {
+        product.clearance_price = parseFloat(clearance_price);
+      }
+    } else if (clearance_price !== undefined) {
+      product.clearance_price = clearance_price !== null ? parseFloat(clearance_price) : null;
+    }
+
+    if (is_featured !== undefined) product.is_featured = is_featured === true || is_featured === 'true';
+    if (featured_order !== undefined) product.featured_order = featured_order !== null ? parseInt(featured_order) : null;
+
+    // Validate final clearance state before saving
+    if (product.is_clearance) {
+      if (product.clearance_price === null || product.clearance_price === undefined) {
+        return res.status(400).json({ success: false, message: 'Clearance price is required when product is marked as clearance.' });
+      }
+      if (product.clearance_price <= 0) {
+        return res.status(400).json({ success: false, message: 'Clearance price must be greater than zero.' });
+      }
+      if (product.clearance_price >= product.price) {
+        return res.status(400).json({ success: false, message: 'Clearance price must be less than the regular selling price.' });
+      }
+    }
 
     await product.save();
     return res.json({ success: true, message: 'Product updated successfully', data: { product } });

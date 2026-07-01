@@ -4,8 +4,14 @@ const Product = require('./Product');
 const Order = require('./Order');
 const OrderItem = require('./OrderItem');
 const Invoice = require('./Invoice');
+const InvoicePaymentHistory = require('./InvoicePaymentHistory');
 const SalesExecutiveAssignment = require('./SalesExecutiveAssignment');
 const StockMovement = require('./StockMovement');
+const ShopPermit = require('./ShopPermit');
+const OrderEditLog = require('./OrderEditLog');
+const DraftOrder = require('./DraftOrder');
+const DraftOrderItem = require('./DraftOrderItem');
+const ProductVariationGroup = require('./ProductVariationGroup');
 
 
 
@@ -30,11 +36,33 @@ Product.hasMany(OrderItem, { foreignKey: 'product_id' });
 Invoice.belongsTo(Order, { foreignKey: 'order_id' });
 Order.hasOne(Invoice, { foreignKey: 'order_id' });
 
+// 7a. InvoicePaymentHistory & Invoice & User
+Invoice.hasMany(InvoicePaymentHistory, { foreignKey: 'invoice_id', as: 'PaymentHistory' });
+InvoicePaymentHistory.belongsTo(Invoice, { foreignKey: 'invoice_id' });
+InvoicePaymentHistory.belongsTo(User, { foreignKey: 'verified_by_user_id', as: 'VerifiedBy' });
+User.hasMany(InvoicePaymentHistory, { foreignKey: 'verified_by_user_id' });
+
 // 8. StockMovement associations
 StockMovement.belongsTo(Product, { foreignKey: 'product_id' });
 Product.hasMany(StockMovement, { foreignKey: 'product_id' });
 StockMovement.belongsTo(Order, { foreignKey: 'order_id' });
 Order.hasMany(StockMovement, { foreignKey: 'order_id' });
+
+// 9. ShopPermit associations
+ShopPermit.belongsTo(Shop, { foreignKey: 'shop_id' });
+Shop.hasMany(ShopPermit, { foreignKey: 'shop_id', as: 'permits' });
+
+// 10. OrderEditLog associations
+OrderEditLog.belongsTo(Order, { foreignKey: 'order_id' });
+Order.hasMany(OrderEditLog, { foreignKey: 'order_id' });
+
+// 11. DraftOrder associations
+DraftOrder.belongsTo(Shop, { foreignKey: 'shop_id' });
+Shop.hasMany(DraftOrder, { foreignKey: 'shop_id' });
+DraftOrder.hasMany(DraftOrderItem, { foreignKey: 'draft_order_id' });
+DraftOrderItem.belongsTo(DraftOrder, { foreignKey: 'draft_order_id' });
+DraftOrderItem.belongsTo(Product, { foreignKey: 'product_id' });
+Product.hasMany(DraftOrderItem, { foreignKey: 'product_id' });
 
 module.exports = {
   User,
@@ -43,6 +71,12 @@ module.exports = {
   Order,
   OrderItem,
   Invoice,
+  InvoicePaymentHistory,
   SalesExecutiveAssignment,
-  StockMovement
+  StockMovement,
+  ShopPermit,
+  OrderEditLog,
+  DraftOrder,
+  DraftOrderItem,
+  ProductVariationGroup,
 };

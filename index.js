@@ -31,6 +31,9 @@ const orderRoutes = require('./routes/orderRoutes');
 const invoiceRoutes = require('./routes/invoiceRoutes');
 const salesRoutes = require('./routes/salesRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
+const permitRoutes = require('./routes/permitRoutes');
+const draftOrderRoutes = require('./routes/draftOrderRoutes');
+const variationGroupRoutes = require('./routes/variationGroupRoutes');
 
 const app = express();
 
@@ -54,6 +57,9 @@ app.use('/orders', orderRoutes);
 app.use('/invoices', invoiceRoutes);
 app.use('/sales', salesRoutes);
 app.use('/dashboard', dashboardRoutes);
+app.use('/permits', permitRoutes);
+app.use('/drafts', draftOrderRoutes);
+app.use('/variation-groups', variationGroupRoutes);
 console.timeEnd('🛣️ Route Registration');
 
 const PORT = process.env.PORT || 3000;
@@ -72,6 +78,29 @@ if (require.main === module) {
       .catch((err) => {
         console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
       })
+      // Migrate ShopPermits.permit_type from ENUM to VARCHAR so new permit types
+      // can be added without a database migration in the future.
+      .then(() => sequelize.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1
+            FROM pg_attribute a
+            JOIN pg_class c ON a.attrelid = c.oid
+            JOIN pg_type t ON a.atttypid = t.oid
+            WHERE c.relname = 'ShopPermits'
+              AND a.attname = 'permit_type'
+              AND t.typtype = 'e'
+          ) THEN
+            ALTER TABLE "ShopPermits"
+              ALTER COLUMN permit_type TYPE VARCHAR(255)
+              USING permit_type::text;
+            DROP TYPE IF EXISTS "enum_ShopPermits_permit_type";
+          END IF;
+        END $$;
+      `).catch((err) => {
+        console.log("Note: ShopPermits permit_type migration note (safe):", err.message);
+      }))
       .then(() => {
         return sequelize.sync({ alter: true });
       })

@@ -14,7 +14,11 @@ const Product = sequelize.define('Product', {
   stock_quantity: { type: DataTypes.INTEGER, allowNull: false },
   image_url: { type: DataTypes.STRING, allowNull: true },
   description: { type: DataTypes.TEXT, allowNull: true },
-  is_active: { type: DataTypes.BOOLEAN, defaultValue: true, allowNull: false }
+  is_active: { type: DataTypes.BOOLEAN, defaultValue: true, allowNull: false },
+  is_clearance: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+  clearance_price: { type: DataTypes.FLOAT, allowNull: true },
+  is_featured: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+  featured_order: { type: DataTypes.INTEGER, allowNull: true }
 }, {
   timestamps: true,
   createdAt: 'created_at',
@@ -22,7 +26,8 @@ const Product = sequelize.define('Product', {
   indexes: [
     { fields: ['main_category'] },
     { fields: ['sub_category'] },
-    { fields: ['sku_id'] }
+    { fields: ['sku_id'] },
+    { fields: ['is_featured'] }
   ]
 });
 

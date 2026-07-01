@@ -1,14 +1,22 @@
 const express = require('express');
 const Invoice = require('../models/Invoice');
+const InvoicePaymentHistory = require('../models/InvoicePaymentHistory');
 const Order = require('../models/Order');
 const OrderItem = require('../models/OrderItem');
 const Product = require('../models/Product');
 const Shop = require('../models/Shop');
+const User = require('../models/User');
 const { uploadInvoicePDF } = require('../services/pdfService');
-
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
+const sequelize = require('../config/db');
 
 const router = express.Router();
+
+const PAYMENT_HISTORY_INCLUDE = {
+  model: InvoicePaymentHistory,
+  as: 'PaymentHistory',
+  include: [{ model: User, as: 'VerifiedBy', attributes: ['id', 'name'] }],
+};
 
 const checkInvoiceAccess = async (orderId, headers) => {
   const shopId = headers['x-shop-id'];
@@ -20,7 +28,6 @@ const checkInvoiceAccess = async (orderId, headers) => {
     return { hasAccess: false, status: 404, message: 'Order not found' };
   }
 
-  // 1. If customer (shop)
   if (shopId) {
     if (String(order.shop_id) !== String(shopId)) {
       return { hasAccess: false, status: 403, message: 'Access denied: This invoice does not belong to your shop' };
@@ -28,7 +35,6 @@ const checkInvoiceAccess = async (orderId, headers) => {
     return { hasAccess: true, order };
   }
 
-  // 2. If platform user
   if (userRole) {
     if (userRole === 'Admin' || userRole === 'Seller') {
       return { hasAccess: true, order };
@@ -48,11 +54,36 @@ const checkInvoiceAccess = async (orderId, headers) => {
     }
   }
 
-  // Default: Deny access if no credentials are provided
   return { hasAccess: false, status: 401, message: 'Unauthorized: Access credentials missing' };
 };
 
-// Get invoice by order ID
+// ── GET /invoices/payments — all payment history (Admin/Seller/Sales only) ──
+// Must be defined before /:orderId to avoid "payments" being parsed as orderId
+router.get('/payments', async (req, res) => {
+  const userRole = req.headers['x-user-role'];
+  if (!userRole || !['Admin', 'Seller', 'Sales Executive'].includes(userRole)) {
+    return res.status(403).json({ success: false, message: 'Access denied' });
+  }
+
+  try {
+    const payments = await InvoicePaymentHistory.findAll({
+      include: [
+        {
+          model: Invoice,
+          include: [{ model: Order, include: [Shop] }]
+        },
+        { model: User, as: 'VerifiedBy', attributes: ['id', 'name'] }
+      ],
+      order: [['created_at', 'DESC']]
+    });
+    return res.json({ success: true, data: { payments } });
+  } catch (err) {
+    console.error('Error fetching all payments:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /invoices/:orderId — get invoice by order ID ──
 router.get('/:orderId', async (req, res) => {
   const { orderId } = req.params;
 
@@ -61,7 +92,17 @@ router.get('/:orderId', async (req, res) => {
     if (!access.hasAccess) {
       return res.status(access.status).json({ success: false, message: access.message });
     }
-    const invoice = await Invoice.findOne({ where: { order_id: orderId }, include: [Order] });
+    const invoice = await Invoice.findOne({
+      where: { order_id: orderId },
+      include: [
+        Order,
+        {
+          ...PAYMENT_HISTORY_INCLUDE,
+          separate: true,
+          order: [['created_at', 'DESC']]
+        }
+      ]
+    });
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
@@ -73,7 +114,7 @@ router.get('/:orderId', async (req, res) => {
   }
 });
 
-// Generate invoice manually (creates if not exist)
+// ── POST /invoices/:orderId/generate ──
 router.post('/:orderId/generate', async (req, res) => {
   const { orderId } = req.params;
 
@@ -140,7 +181,7 @@ router.post('/:orderId/generate', async (req, res) => {
   }
 });
 
-// Regenerate invoice manually
+// ── POST /invoices/:invoiceId/regenerate ──
 router.post('/:invoiceId/regenerate', async (req, res) => {
   const { invoiceId } = req.params;
 
@@ -188,6 +229,120 @@ router.post('/:invoiceId/regenerate', async (req, res) => {
     });
   } catch (err) {
     console.error('Error regenerating invoice:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /invoices/:invoiceId/payments — payment history for one invoice ──
+router.get('/:invoiceId/payments', async (req, res) => {
+  const { invoiceId } = req.params;
+
+  try {
+    const invoice = await Invoice.findByPk(invoiceId);
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const access = await checkInvoiceAccess(invoice.order_id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const payments = await InvoicePaymentHistory.findAll({
+      where: { invoice_id: invoiceId },
+      include: [{ model: User, as: 'VerifiedBy', attributes: ['id', 'name'] }],
+      order: [['created_at', 'DESC']]
+    });
+    return res.json({ success: true, data: { payments } });
+  } catch (err) {
+    console.error('Error fetching invoice payments:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── POST /invoices/:invoiceId/payments — record a new payment ──
+router.post('/:invoiceId/payments', async (req, res) => {
+  const { invoiceId } = req.params;
+  const { payment_method, payment_amount, payment_reference_no, remarks } = req.body;
+
+  const VALID_METHODS = ['Cash', 'Card', 'Check', 'MO', 'Adjusted'];
+  if (!payment_method || !VALID_METHODS.includes(payment_method)) {
+    return res.status(400).json({
+      success: false,
+      message: `payment_method is required and must be one of: ${VALID_METHODS.join(', ')}`
+    });
+  }
+
+  const amount = Number(payment_amount);
+  if (!payment_amount || isNaN(amount) || amount <= 0) {
+    return res.status(400).json({ success: false, message: 'payment_amount must be a positive number' });
+  }
+
+  const t = await sequelize.transaction();
+  try {
+    const invoice = await Invoice.findByPk(invoiceId, { transaction: t, lock: true });
+    if (!invoice) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const access = await checkInvoiceAccess(invoice.order_id, req.headers);
+    if (!access.hasAccess) {
+      await t.rollback();
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    const currentPaid = Number(invoice.total_paid_amount) || 0;
+    const newTotal = currentPaid + amount;
+
+    if (newTotal > invoice.final_amount + 0.005) {
+      await t.rollback();
+      const remaining = invoice.final_amount - currentPaid;
+      return res.status(400).json({
+        success: false,
+        message: `Payment of $${amount.toFixed(2)} would exceed the remaining balance of $${remaining.toFixed(2)}.`
+      });
+    }
+
+    const verifiedByUserId = req.headers['x-user-id'] ? Number(req.headers['x-user-id']) : null;
+
+    await InvoicePaymentHistory.create({
+      invoice_id: Number(invoiceId),
+      payment_method,
+      payment_amount: amount,
+      payment_reference_no: payment_reference_no || null,
+      remarks: remarks || null,
+      verified_by_user_id: verifiedByUserId,
+      verified_at: new Date(),
+    }, { transaction: t });
+
+    const remaining = invoice.final_amount - newTotal;
+    const newStatus = newTotal >= invoice.final_amount - 0.005 ? 'paid' : 'partially_paid';
+
+    await invoice.update({
+      total_paid_amount: newTotal,
+      remaining_balance: remaining < 0.005 ? 0 : remaining,
+      payment_status: newStatus,
+    }, { transaction: t });
+
+    await t.commit();
+
+    // Return updated invoice with full payment history
+    const updatedInvoice = await Invoice.findByPk(invoiceId, {
+      include: [
+        {
+          ...PAYMENT_HISTORY_INCLUDE,
+          separate: true,
+          order: [['created_at', 'DESC']]
+        }
+      ]
+    });
+
+    const statusMsg = newStatus === 'paid' ? 'Invoice fully paid' : 'Partial payment recorded';
+    return res.json({ success: true, message: statusMsg, data: { invoice: updatedInvoice } });
+  } catch (err) {
+    await t.rollback();
+    console.error('Error recording payment:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
