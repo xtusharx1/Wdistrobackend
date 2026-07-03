@@ -22,7 +22,7 @@ const StockMovement = sequelize.define('StockMovement', {
       model: Order,
       key: 'id'
     },
-    allowNull: false
+    allowNull: true
   },
   action: { type: DataTypes.STRING, allowNull: false }, // 'Approval' or 'Cancellation'
   created_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, allowNull: false }

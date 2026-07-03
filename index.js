@@ -34,6 +34,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const permitRoutes = require('./routes/permitRoutes');
 const draftOrderRoutes = require('./routes/draftOrderRoutes');
 const variationGroupRoutes = require('./routes/variationGroupRoutes');
+const inventoryReceivingRoutes = require('./routes/inventoryReceivingRoutes');
 
 const app = express();
 
@@ -60,6 +61,7 @@ app.use('/dashboard', dashboardRoutes);
 app.use('/permits', permitRoutes);
 app.use('/drafts', draftOrderRoutes);
 app.use('/variation-groups', variationGroupRoutes);
+app.use('/inventory-receiving', inventoryReceivingRoutes);
 console.timeEnd('🛣️ Route Registration');
 
 const PORT = process.env.PORT || 3000;

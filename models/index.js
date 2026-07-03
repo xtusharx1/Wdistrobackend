@@ -12,6 +12,8 @@ const OrderEditLog = require('./OrderEditLog');
 const DraftOrder = require('./DraftOrder');
 const DraftOrderItem = require('./DraftOrderItem');
 const ProductVariationGroup = require('./ProductVariationGroup');
+const InventoryReceipt = require('./InventoryReceipt');
+const InventoryReceiptItem = require('./InventoryReceiptItem');
 
 
 
@@ -66,6 +68,14 @@ DraftOrderItem.belongsTo(DraftOrder, { foreignKey: 'draft_order_id' });
 DraftOrderItem.belongsTo(Product, { foreignKey: 'product_id' });
 Product.hasMany(DraftOrderItem, { foreignKey: 'product_id' });
 
+// 12. InventoryReceipt & InventoryReceiptItem associations
+InventoryReceipt.belongsTo(User, { as: 'ReceivedBy', foreignKey: 'received_by_user_id' });
+User.hasMany(InventoryReceipt, { foreignKey: 'received_by_user_id' });
+InventoryReceipt.hasMany(InventoryReceiptItem, { as: 'items', foreignKey: 'inventory_receipt_id' });
+InventoryReceiptItem.belongsTo(InventoryReceipt, { foreignKey: 'inventory_receipt_id' });
+InventoryReceiptItem.belongsTo(Product, { foreignKey: 'product_id' });
+Product.hasMany(InventoryReceiptItem, { foreignKey: 'product_id' });
+
 module.exports = {
   User,
   Shop,
@@ -81,4 +91,6 @@ module.exports = {
   DraftOrder,
   DraftOrderItem,
   ProductVariationGroup,
+  InventoryReceipt,
+  InventoryReceiptItem,
 };
