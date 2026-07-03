@@ -118,7 +118,7 @@ router.post('/', async (req, res) => {
       order_id: order.id,
       product_id: item.product_id,
       requested_qty: item.requested_qty,
-      approved_qty: 0,
+      approved_qty: null,
       price: item.price,
     }));
 
@@ -667,6 +667,11 @@ router.put('/:id/edit', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
+    const shop = await Shop.findByPk(order.shop_id);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop associated with this order not found' });
+    }
+
     const LOCKED_STATUSES = ['dispatched', 'delivered', 'completed', 'cancelled'];
     if (LOCKED_STATUSES.includes(order.status)) {
       return res.status(400).json({
@@ -675,7 +680,8 @@ router.put('/:id/edit', async (req, res) => {
       });
     }
 
-    const isApproved = order.status === 'approved' || order.status === 'processed';
+    const wasPending = order.status === 'pending';
+    const isApproved = true;
     const parsedUserId = userId ? parseInt(userId) : null;
     const auditLogs = [];
 
@@ -699,202 +705,155 @@ router.put('/:id/edit', async (req, res) => {
         if (product) productCache.set(pid, product);
       }
 
-      // Validate all new products exist
+      // Validate all new products exist and check license requirements
       for (const newItem of items) {
-        if (!productCache.has(newItem.product_id)) {
+        const product = productCache.get(newItem.product_id);
+        if (!product) {
           const err = new Error(`Product ID ${newItem.product_id} not found`);
           err.statusCode = 404;
           throw err;
         }
+        if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
+          const err = new Error(`Seller Permit Required for "${product.name}".`);
+          err.statusCode = 403;
+          throw err;
+        }
+        if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
+          const err = new Error(`Tobacco License Required for "${product.name}".`);
+          err.statusCode = 403;
+          throw err;
+        }
       }
 
-      if (isApproved) {
-        // ── Removed items: restore approved_qty back to stock ──────────────
-        for (const oldItem of oldItems) {
-          if (!newItemMap.has(oldItem.product_id)) {
-            const product = productCache.get(oldItem.product_id);
-            if (product && oldItem.approved_qty > 0) {
-              const prevStock = product.stock_quantity;
-              product.stock_quantity += oldItem.approved_qty;
-              if (product.stock_quantity > 0) product.is_active = true;
-              await product.save({ transaction: t });
-              await StockMovement.create({
-                product_id: product.id,
-                quantity_changed: oldItem.approved_qty,
-                previous_stock: prevStock,
-                new_stock: product.stock_quantity,
-                order_id: order.id,
-                action: 'Edit - Item Removed'
-              }, { transaction: t });
-            }
-            auditLogs.push({
+      // ── Removed items: restore approved_qty back to stock ──────────────
+      for (const oldItem of oldItems) {
+        if (!newItemMap.has(oldItem.product_id)) {
+          const product = productCache.get(oldItem.product_id);
+          if (product && oldItem.approved_qty > 0) {
+            const prevStock = product.stock_quantity;
+            product.stock_quantity += oldItem.approved_qty;
+            if (product.stock_quantity > 0) product.is_active = true;
+            await product.save({ transaction: t });
+            await StockMovement.create({
+              product_id: product.id,
+              quantity_changed: oldItem.approved_qty,
+              previous_stock: prevStock,
+              new_stock: product.stock_quantity,
               order_id: order.id,
-              user_id: parsedUserId,
-              action: 'item_removed',
-              product_id: oldItem.product_id,
-              product_name: oldItem.Product?.name || null,
-              previous_value: { quantity: oldItem.approved_qty, price: oldItem.custom_price ?? oldItem.price },
-              new_value: null
-            });
+              action: 'Edit - Item Removed'
+            }, { transaction: t });
           }
+          auditLogs.push({
+            order_id: order.id,
+            user_id: parsedUserId,
+            action: 'item_removed',
+            product_id: oldItem.product_id,
+            product_name: oldItem.Product?.name || null,
+            previous_value: { quantity: oldItem.approved_qty || oldItem.requested_qty, price: oldItem.custom_price ?? oldItem.price },
+            new_value: null
+          });
         }
+      }
 
-        // ── Added and changed items: adjust stock by delta ─────────────────
-        for (const newItem of items) {
-          const product = productCache.get(newItem.product_id);
-          const oldItem = oldItemMap.get(newItem.product_id);
-          const newCustomPrice = (newItem.custom_price != null && newItem.custom_price !== '') ? parseFloat(newItem.custom_price) : null;
+      // ── Added and changed items: adjust stock by delta ─────────────────
+      for (const newItem of items) {
+        const product = productCache.get(newItem.product_id);
+        const oldItem = oldItemMap.get(newItem.product_id);
+        const newCustomPrice = (newItem.custom_price != null && newItem.custom_price !== '') ? parseFloat(newItem.custom_price) : null;
 
-          if (!oldItem) {
-            // Brand new product added to the order
-            if (newItem.quantity > product.stock_quantity) {
-              const err = new Error(`Insufficient stock for "${product.name}". Available: ${product.stock_quantity}, requested: ${newItem.quantity}`);
+        if (!oldItem) {
+          // Brand new product added to the order
+          if (newItem.quantity > product.stock_quantity) {
+            const err = new Error(`Insufficient stock for "${product.name}". Available: ${product.stock_quantity}, requested: ${newItem.quantity}`);
+            err.statusCode = 400;
+            throw err;
+          }
+          const prevStock = product.stock_quantity;
+          product.stock_quantity -= newItem.quantity;
+          if (product.stock_quantity === 0) product.is_active = false;
+          await product.save({ transaction: t });
+          await StockMovement.create({
+            product_id: product.id,
+            quantity_changed: -newItem.quantity,
+            previous_stock: prevStock,
+            new_stock: product.stock_quantity,
+            order_id: order.id,
+            action: 'Edit - Item Added'
+          }, { transaction: t });
+          auditLogs.push({
+            order_id: order.id,
+            user_id: parsedUserId,
+            action: 'item_added',
+            product_id: newItem.product_id,
+            product_name: product.name,
+            previous_value: null,
+            new_value: { quantity: newItem.quantity, price: newCustomPrice ?? product.price }
+          });
+        } else {
+          // Existing product: compute quantity delta
+          const oldQty = oldItem.approved_qty || 0;
+          const delta = newItem.quantity - oldQty;
+
+          if (delta > 0) {
+            if (delta > product.stock_quantity) {
+              const err = new Error(`Insufficient stock for "${product.name}". Available: ${product.stock_quantity}, additional needed: ${delta}`);
               err.statusCode = 400;
               throw err;
             }
             const prevStock = product.stock_quantity;
-            product.stock_quantity -= newItem.quantity;
+            product.stock_quantity -= delta;
             if (product.stock_quantity === 0) product.is_active = false;
             await product.save({ transaction: t });
             await StockMovement.create({
               product_id: product.id,
-              quantity_changed: -newItem.quantity,
+              quantity_changed: -delta,
               previous_stock: prevStock,
               new_stock: product.stock_quantity,
               order_id: order.id,
-              action: 'Edit - Item Added'
+              action: 'Edit - Quantity Increased'
             }, { transaction: t });
+          } else if (delta < 0) {
+            const restore = -delta;
+            const prevStock = product.stock_quantity;
+            product.stock_quantity += restore;
+            if (product.stock_quantity > 0) product.is_active = true;
+            await product.save({ transaction: t });
+            await StockMovement.create({
+              product_id: product.id,
+              quantity_changed: restore,
+              previous_stock: prevStock,
+              new_stock: product.stock_quantity,
+              order_id: order.id,
+              action: 'Edit - Quantity Decreased'
+            }, { transaction: t });
+          }
+
+          const prevQtyForAudit = wasPending ? oldItem.requested_qty : oldQty;
+          if (newItem.quantity !== prevQtyForAudit) {
             auditLogs.push({
               order_id: order.id,
               user_id: parsedUserId,
-              action: 'item_added',
+              action: 'quantity_changed',
               product_id: newItem.product_id,
               product_name: product.name,
-              previous_value: null,
-              new_value: { quantity: newItem.quantity, price: newCustomPrice ?? product.price }
+              previous_value: { quantity: prevQtyForAudit },
+              new_value: { quantity: newItem.quantity }
             });
-          } else {
-            // Existing product: compute quantity delta
-            const oldQty = oldItem.approved_qty || 0;
-            const delta = newItem.quantity - oldQty;
-
-            if (delta > 0) {
-              if (delta > product.stock_quantity) {
-                const err = new Error(`Insufficient stock for "${product.name}". Available: ${product.stock_quantity}, additional needed: ${delta}`);
-                err.statusCode = 400;
-                throw err;
-              }
-              const prevStock = product.stock_quantity;
-              product.stock_quantity -= delta;
-              if (product.stock_quantity === 0) product.is_active = false;
-              await product.save({ transaction: t });
-              await StockMovement.create({
-                product_id: product.id,
-                quantity_changed: -delta,
-                previous_stock: prevStock,
-                new_stock: product.stock_quantity,
-                order_id: order.id,
-                action: 'Edit - Quantity Increased'
-              }, { transaction: t });
-            } else if (delta < 0) {
-              const restore = -delta;
-              const prevStock = product.stock_quantity;
-              product.stock_quantity += restore;
-              if (product.stock_quantity > 0) product.is_active = true;
-              await product.save({ transaction: t });
-              await StockMovement.create({
-                product_id: product.id,
-                quantity_changed: restore,
-                previous_stock: prevStock,
-                new_stock: product.stock_quantity,
-                order_id: order.id,
-                action: 'Edit - Quantity Decreased'
-              }, { transaction: t });
-            }
-
-            if (delta !== 0) {
-              auditLogs.push({
-                order_id: order.id,
-                user_id: parsedUserId,
-                action: 'quantity_changed',
-                product_id: newItem.product_id,
-                product_name: product.name,
-                previous_value: { quantity: oldQty },
-                new_value: { quantity: newItem.quantity }
-              });
-            }
-
-            // Audit price changes
-            const oldEffective = oldItem.custom_price ?? oldItem.price;
-            const newEffective = newCustomPrice ?? product.price;
-            if (Math.abs(oldEffective - newEffective) > 0.001) {
-              auditLogs.push({
-                order_id: order.id,
-                user_id: parsedUserId,
-                action: 'price_changed',
-                product_id: newItem.product_id,
-                product_name: product.name,
-                previous_value: { price: oldEffective },
-                new_value: { price: newEffective }
-              });
-            }
           }
-        }
-      } else {
-        // Pending order: no inventory changes, audit only
-        for (const oldItem of oldItems) {
-          if (!newItemMap.has(oldItem.product_id)) {
+
+          // Audit price changes
+          const oldEffective = oldItem.custom_price ?? oldItem.price;
+          const newEffective = newCustomPrice ?? product.price;
+          if (Math.abs(oldEffective - newEffective) > 0.001) {
             auditLogs.push({
               order_id: order.id,
               user_id: parsedUserId,
-              action: 'item_removed',
-              product_id: oldItem.product_id,
-              product_name: oldItem.Product?.name || null,
-              previous_value: { quantity: oldItem.requested_qty, price: oldItem.custom_price ?? oldItem.price },
-              new_value: null
-            });
-          }
-        }
-        for (const newItem of items) {
-          const product = productCache.get(newItem.product_id);
-          const oldItem = oldItemMap.get(newItem.product_id);
-          const newCustomPrice = (newItem.custom_price != null && newItem.custom_price !== '') ? parseFloat(newItem.custom_price) : null;
-
-          if (!oldItem) {
-            auditLogs.push({
-              order_id: order.id,
-              user_id: parsedUserId,
-              action: 'item_added',
+              action: 'price_changed',
               product_id: newItem.product_id,
               product_name: product.name,
-              previous_value: null,
-              new_value: { quantity: newItem.quantity, price: newCustomPrice ?? product.price }
+              previous_value: { price: oldEffective },
+              new_value: { price: newEffective }
             });
-          } else {
-            if (oldItem.requested_qty !== newItem.quantity) {
-              auditLogs.push({
-                order_id: order.id,
-                user_id: parsedUserId,
-                action: 'quantity_changed',
-                product_id: newItem.product_id,
-                product_name: product.name,
-                previous_value: { quantity: oldItem.requested_qty },
-                new_value: { quantity: newItem.quantity }
-              });
-            }
-            const oldEffective = oldItem.custom_price ?? oldItem.price;
-            const newEffective = newCustomPrice ?? product.price;
-            if (Math.abs(oldEffective - newEffective) > 0.001) {
-              auditLogs.push({
-                order_id: order.id,
-                user_id: parsedUserId,
-                action: 'price_changed',
-                product_id: newItem.product_id,
-                product_name: product.name,
-                previous_value: { price: oldEffective },
-                new_value: { price: newEffective }
-              });
-            }
           }
         }
       }
@@ -913,7 +872,7 @@ router.put('/:id/edit', async (req, res) => {
           order_id: order.id,
           product_id: newItem.product_id,
           requested_qty: newItem.quantity,
-          approved_qty: isApproved ? newItem.quantity : 0,
+          approved_qty: newItem.quantity,
           price: product.price,
           custom_price: customPrice
         });
@@ -922,6 +881,10 @@ router.put('/:id/edit', async (req, res) => {
       await OrderItem.bulkCreate(newOrderItems, { transaction: t });
 
       order.total_amount = newTotal;
+      if (wasPending) {
+        order.status = 'approved';
+        order.approved_at = new Date();
+      }
       await order.save({ transaction: t });
 
       if (auditLogs.length > 0) {
@@ -929,24 +892,30 @@ router.put('/:id/edit', async (req, res) => {
       }
     });
 
-    // ── Post-transaction: regenerate existing invoice ──────────────────────
+    // ── Post-transaction: create or regenerate invoice ──────────────────────
     const updatedOrder = await Order.findByPk(id, {
       include: [{ model: OrderItem, include: [Product] }]
     });
 
-    const existingInvoice = await Invoice.findOne({ where: { order_id: order.id } });
-    if (existingInvoice) {
-      const shop = await Shop.findByPk(order.shop_id);
-      if (shop) {
-        try {
-          const pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
-          existingInvoice.final_amount = updatedOrder.total_amount;
-          existingInvoice.pdf_url = pdfUrl;
-          existingInvoice.generated_at = new Date();
-          await existingInvoice.save();
-        } catch (pdfErr) {
-          console.error('Failed to regenerate invoice PDF after order edit:', pdfErr);
+    let invoice = await Invoice.findOne({ where: { order_id: order.id } });
+    if (shop) {
+      try {
+        const pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
+        if (invoice) {
+          invoice.final_amount = updatedOrder.total_amount;
+          invoice.pdf_url = pdfUrl;
+          invoice.generated_at = new Date();
+          await invoice.save();
+        } else {
+          await Invoice.create({
+            order_id: updatedOrder.id,
+            final_amount: updatedOrder.total_amount,
+            generated_at: new Date(),
+            pdf_url: pdfUrl
+          });
         }
+      } catch (pdfErr) {
+        console.error('Failed to generate/regenerate invoice PDF after order edit:', pdfErr);
       }
     }
 

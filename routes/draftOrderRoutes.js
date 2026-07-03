@@ -271,7 +271,7 @@ router.post('/:id/submit', async (req, res) => {
             order_id: newOrder.id,
             product_id: item.product_id,
             requested_qty: item.quantity,
-            approved_qty: 0,
+            approved_qty: null,
             price,
             custom_price: item.custom_price || null,
           };
