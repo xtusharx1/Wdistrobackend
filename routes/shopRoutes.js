@@ -55,6 +55,7 @@ router.get('/', async (req, res) => {
 // Approve shop
 router.patch('/:id/approve', async (req, res) => {
   const { id } = req.params;
+  const { allow_explicit_products } = req.body;
 
   try {
     const shop = await Shop.findByPk(id);
@@ -64,6 +65,9 @@ router.patch('/:id/approve', async (req, res) => {
 
     shop.approved = true;
     shop.approval_status = 'Approved';
+    if (allow_explicit_products !== undefined) {
+      shop.allow_explicit_products = allow_explicit_products === true || allow_explicit_products === 'true';
+    }
     await shop.save();
 
     return res.json({ success: true, message: 'Shop approved successfully', data: { shop } });
@@ -109,7 +113,8 @@ router.patch('/:id', async (req, res) => {
     state,
     zip,
     approved,
-    approval_status
+    approval_status,
+    allow_explicit_products
   } = req.body;
 
   try {
@@ -130,6 +135,9 @@ router.patch('/:id', async (req, res) => {
     if (zip !== undefined) shop.zip = zip;
     if (approved !== undefined) shop.approved = approved;
     if (approval_status !== undefined) shop.approval_status = approval_status;
+    if (allow_explicit_products !== undefined) {
+      shop.allow_explicit_products = allow_explicit_products === true || allow_explicit_products === 'true';
+    }
 
     await shop.save();
     return res.json({ success: true, message: 'Shop updated successfully', data: { shop } });

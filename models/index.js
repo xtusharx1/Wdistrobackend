@@ -14,8 +14,14 @@ const DraftOrderItem = require('./DraftOrderItem');
 const ProductVariationGroup = require('./ProductVariationGroup');
 const InventoryReceipt = require('./InventoryReceipt');
 const InventoryReceiptItem = require('./InventoryReceiptItem');
+const Category = require('./Category');
+const ProductCollection = require('./ProductCollection');
 
 
+
+// 2. Product and ProductCollection association
+Product.belongsTo(ProductCollection, { foreignKey: 'product_collection_id', as: 'ProductCollection' });
+ProductCollection.hasMany(Product, { foreignKey: 'product_collection_id' });
 
 // 3. Sales Executive Assignment & Shop / User
 SalesExecutiveAssignment.belongsTo(User, { as: 'SalesExecutive', foreignKey: 'sales_exec_id' });
@@ -93,4 +99,6 @@ module.exports = {
   ProductVariationGroup,
   InventoryReceipt,
   InventoryReceiptItem,
+  Category,
+  ProductCollection,
 };

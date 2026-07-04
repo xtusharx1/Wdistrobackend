@@ -101,6 +101,9 @@ router.post('/', async (req, res) => {
       if (!product) {
         return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
       }
+      if (product.is_explicit_product && !shop.allow_explicit_products) {
+        return res.status(403).json({ success: false, message: 'Explicit products are not allowed for this store.' });
+      }
       if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
         return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
       }
@@ -180,7 +183,7 @@ router.get('/', async (req, res) => {
         },
         {
           model: Invoice,
-          attributes: ['id', 'order_id', 'final_amount', 'generated_at', 'pdf_url']
+          attributes: ['id', 'order_id', 'final_amount', 'generated_at', 'pdf_url', 'payment_status', 'total_paid_amount', 'remaining_balance']
         }
       ],
       order: [['created_at', 'DESC']]

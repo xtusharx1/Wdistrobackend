@@ -35,12 +35,27 @@ const permitRoutes = require('./routes/permitRoutes');
 const draftOrderRoutes = require('./routes/draftOrderRoutes');
 const variationGroupRoutes = require('./routes/variationGroupRoutes');
 const inventoryReceivingRoutes = require('./routes/inventoryReceivingRoutes');
+const categoryRoutes = require('./routes/categoryRoutes');
+const collectionRoutes = require('./routes/collectionRoutes');
+const customerRoutes = require('./routes/customerRoutes');
 
 const app = express();
 
-app.use(compression());
 app.use(cors());
+app.use(compression());
 app.use(express.json());
+
+let dbSynced = false;
+
+app.use((req, res, next) => {
+  if (!dbSynced && (req.path.startsWith('/categories') || req.path.startsWith('/inventory-receiving') || req.path.startsWith('/collections'))) {
+    return res.status(503).json({
+      success: false,
+      message: 'Database synchronization is in progress. Please reload in a few seconds.'
+    });
+  }
+  next();
+});
 
 // Ensure uploads directory exists and serve it statically
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -62,6 +77,9 @@ app.use('/permits', permitRoutes);
 app.use('/drafts', draftOrderRoutes);
 app.use('/variation-groups', variationGroupRoutes);
 app.use('/inventory-receiving', inventoryReceivingRoutes);
+app.use('/categories', categoryRoutes);
+app.use('/collections', collectionRoutes);
+app.use('/customers', customerRoutes);
 console.timeEnd('🛣️ Route Registration');
 
 const PORT = process.env.PORT || 3000;
@@ -104,10 +122,78 @@ if (require.main === module) {
         console.log("Note: ShopPermits permit_type migration note (safe):", err.message);
       }))
       .then(() => {
-        return sequelize.sync({ alter: true });
+        return sequelize.sync();
       })
-      .then(() => {
-        console.log("Database models synced successfully with { alter: true } ✅");
+      .then(async () => {
+        console.log("Database models synced successfully ✅");
+        
+        // Idempotent seeding for Categories
+        try {
+          const { Category } = require('./models');
+          const count = await Category.count();
+          if (count === 0) {
+            console.log('Seeding initial categories...');
+            const initialCategories = [
+              { category_name: 'General Merchandise', sub_categories: ['Cables', 'Toys', 'Misc', 'Clothing', 'Supplements', 'Medicine (OTC)'], display_order: 1, is_active: true },
+              { category_name: 'Glass', sub_categories: ['Glass Rigs', 'Glass Accessories', 'Grinders'], display_order: 2, is_active: true },
+              { category_name: 'Tobacco', sub_categories: ['Wraps', 'Cigars', 'Cigarillos', 'Rolling Tobacco', 'Chew/Pouches'], display_order: 3, is_active: true },
+              { category_name: 'Lighters', sub_categories: ['Pocket Torches', 'High Flame', 'Butane', 'Torch Lighters'], display_order: 4, is_active: true },
+              { category_name: 'Vape', sub_categories: ['Disposable', 'Hardware', 'Vape Accessories', 'Juices'], display_order: 5, is_active: true },
+              { category_name: 'Rolling Papers', sub_categories: ['Papers', 'Rolling Machine', 'Tips', 'Cones'], display_order: 6, is_active: true }
+            ];
+            await Category.bulkCreate(initialCategories);
+            console.log('Initial categories seeded successfully! ✅');
+          }
+        } catch (err) {
+          console.error('Error seeding categories:', err);
+        }
+
+        // Idempotent seeding and one-time migration for ProductCollections
+        try {
+          const { ProductCollection, Product } = require('./models');
+          const collCount = await ProductCollection.count();
+          if (collCount === 0) {
+            console.log('Seeding initial product collections...');
+            const defaultCollections = [
+              { name: 'Deals', is_active: true },
+              { name: 'Clearance', is_active: true },
+              { name: 'New Arrival', is_active: true },
+              { name: 'Best Seller', is_active: true },
+              { name: 'Weekly Specials', is_active: true }
+            ];
+            await ProductCollection.bulkCreate(defaultCollections);
+            console.log('Initial product collections seeded successfully! ✅');
+          }
+
+          // Ensure Clearance collection exists
+          const [clearanceCollection] = await ProductCollection.findOrCreate({
+            where: { name: 'Clearance' },
+            defaults: { is_active: true }
+          });
+
+          // Run one-time migration:
+          // Migrate all products where is_clearance = true and product_collection_id IS NULL
+          const unmigratedProducts = await Product.findAll({
+            where: {
+              is_clearance: true,
+              product_collection_id: null
+            }
+          });
+
+          if (unmigratedProducts.length > 0) {
+            console.log(`Migrating ${unmigratedProducts.length} legacy clearance products to the Clearance collection...`);
+            for (const p of unmigratedProducts) {
+              p.product_collection_id = clearanceCollection.id;
+              p.deal_price = p.clearance_price;
+              await p.save();
+            }
+            console.log('Legacy clearance products migration completed successfully! ✅');
+          }
+        } catch (err) {
+          console.error('Error seeding/migrating product collections:', err);
+        }
+
+        dbSynced = true;
         console.timeEnd('💾 Database Sync duration');
       })
       .catch((err) => {

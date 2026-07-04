@@ -18,7 +18,7 @@ const requireShop = (req, res) => {
   return parseInt(shopId, 10);
 };
 
-const PRODUCT_ATTRS = ['id', 'name', 'price', 'image_url', 'stock_quantity', 'is_active', 'is_clearance', 'clearance_price'];
+const PRODUCT_ATTRS = ['id', 'name', 'price', 'image_url', 'stock_quantity', 'is_active', 'is_clearance', 'clearance_price', 'product_collection_id', 'deal_price', 'is_explicit_product', 'billing_name'];
 
 // POST /drafts — create a new draft
 router.post('/', async (req, res) => {
@@ -40,8 +40,12 @@ router.post('/', async (req, res) => {
     products.forEach(p => { productMap[p.id] = p; });
 
     for (const item of items) {
-      if (!productMap[item.product_id]) {
+      const p = productMap[item.product_id];
+      if (!p) {
         return res.status(400).json({ success: false, message: `Product ${item.product_id} not found or unavailable` });
+      }
+      if (p.is_explicit_product && !shop.allow_explicit_products) {
+        return res.status(403).json({ success: false, message: `Product ${p.name} is restricted and cannot be added.` });
       }
       if (!Number.isInteger(item.quantity) || item.quantity < 1) {
         return res.status(400).json({ success: false, message: 'Item quantity must be at least 1' });
@@ -50,7 +54,7 @@ router.post('/', async (req, res) => {
 
     const total = items.reduce((sum, item) => {
       const p = productMap[item.product_id];
-      const price = item.custom_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
       return sum + price * item.quantity;
     }, 0);
 
@@ -61,9 +65,9 @@ router.post('/', async (req, res) => {
           draft_order_id: d.id,
           product_id: item.product_id,
           quantity: item.quantity,
-          price_at_save: productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
+          price_at_save: productMap[item.product_id].deal_price || (productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
             ? productMap[item.product_id].clearance_price
-            : productMap[item.product_id].price,
+            : productMap[item.product_id].price),
           custom_price: item.custom_price || null,
         })),
         { transaction: t }
@@ -132,14 +136,21 @@ router.put('/:id', async (req, res) => {
     const draft = await DraftOrder.findOne({ where: { id: req.params.id, shop_id: shopId } });
     if (!draft) return res.status(404).json({ success: false, message: 'Draft not found' });
 
+    const shop = await Shop.findByPk(shopId);
+    if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
+
     const productIds = items.map(i => i.product_id);
     const products = await Product.findAll({ where: { id: productIds, is_active: true } });
     const productMap = {};
     products.forEach(p => { productMap[p.id] = p; });
 
     for (const item of items) {
-      if (!productMap[item.product_id]) {
+      const p = productMap[item.product_id];
+      if (!p) {
         return res.status(400).json({ success: false, message: `Product ${item.product_id} not found or unavailable` });
+      }
+      if (p.is_explicit_product && !shop.allow_explicit_products) {
+        return res.status(403).json({ success: false, message: `Product ${p.name} is restricted and cannot be added.` });
       }
       if (!Number.isInteger(item.quantity) || item.quantity < 1) {
         return res.status(400).json({ success: false, message: 'Item quantity must be at least 1' });
@@ -148,7 +159,7 @@ router.put('/:id', async (req, res) => {
 
     const total = items.reduce((sum, item) => {
       const p = productMap[item.product_id];
-      const price = item.custom_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
       return sum + price * item.quantity;
     }, 0);
 
@@ -159,9 +170,9 @@ router.put('/:id', async (req, res) => {
           draft_order_id: draft.id,
           product_id: item.product_id,
           quantity: item.quantity,
-          price_at_save: productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
+          price_at_save: productMap[item.product_id].deal_price || (productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
             ? productMap[item.product_id].clearance_price
-            : productMap[item.product_id].price,
+            : productMap[item.product_id].price),
           custom_price: item.custom_price || null,
         })),
         { transaction: t }
@@ -227,6 +238,8 @@ router.post('/:id/submit', async (req, res) => {
       const product = item.Product;
       if (!product || !product.is_active) {
         unavailableItems.push({ product_id: item.product_id, reason: 'Product is no longer available' });
+      } else if (product.is_explicit_product && !shop.allow_explicit_products) {
+        unavailableItems.push({ product_id: item.product_id, name: product.name, reason: 'Explicit products are not allowed for this store.' });
       } else if (product.stock_quantity < item.quantity) {
         unavailableItems.push({
           product_id: item.product_id,
@@ -253,7 +266,7 @@ router.post('/:id/submit', async (req, res) => {
     // Use current product prices for the order
     const total = draft.DraftOrderItems.reduce((sum, item) => {
       const p = item.Product;
-      const price = item.custom_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
       return sum + price * item.quantity;
     }, 0);
 
@@ -266,7 +279,7 @@ router.post('/:id/submit', async (req, res) => {
       await OrderItem.bulkCreate(
         draft.DraftOrderItems.map(item => {
           const p = item.Product;
-          const price = p.is_clearance && p.clearance_price ? p.clearance_price : p.price;
+          const price = p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
           return {
             order_id: newOrder.id,
             product_id: item.product_id,

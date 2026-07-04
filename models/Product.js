@@ -17,7 +17,11 @@ const Product = sequelize.define('Product', {
   is_active: { type: DataTypes.BOOLEAN, defaultValue: true, allowNull: false },
   is_clearance: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
   clearance_price: { type: DataTypes.FLOAT, allowNull: true },
-  is_featured: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false }
+  is_featured: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+  product_collection_id: { type: DataTypes.INTEGER, allowNull: true },
+  deal_price: { type: DataTypes.FLOAT, allowNull: true },
+  billing_name: { type: DataTypes.STRING, allowNull: true },
+  is_explicit_product: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false }
 }, {
   timestamps: true,
   createdAt: 'created_at',

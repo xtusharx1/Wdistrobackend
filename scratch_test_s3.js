@@ -14,10 +14,10 @@ const s3 = new S3Client({
   }
 });
 
-s3.send(new ListObjectsV2Command({ Bucket: process.env.AWS_S3_BUCKET || 'wdistro', MaxKeys: 1 }))
+s3.send(new ListObjectsV2Command({ Bucket: process.env.AWS_S3_BUCKET || 'wdistro', MaxKeys: 100 }))
   .then(data => {
-    console.log('SUCCESS: S3 connection works!', data.$metadata);
+    console.log('SUCCESS: S3 connection works!', (data.Contents || []).map(c => c.Key));
   })
   .catch(err => {
-    console.error('ERROR connecting to S3:', err.message);
+    console.error('ERROR connecting to S3:', err.stack);
   });

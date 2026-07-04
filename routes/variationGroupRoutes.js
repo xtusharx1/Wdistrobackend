@@ -14,7 +14,7 @@ router.get('/', async (req, res) => {
     const products = allIds.length > 0
       ? await Product.findAll({
           where: { id: { [Op.in]: allIds } },
-          attributes: ['id', 'name', 'image_url', 'price', 'clearance_price', 'is_clearance', 'stock_quantity', 'sku_id', 'main_category'],
+          attributes: ['id', 'name', 'image_url', 'price', 'clearance_price', 'is_clearance', 'stock_quantity', 'sku_id', 'main_category', 'product_collection_id', 'deal_price'],
         })
       : [];
 

@@ -24,7 +24,8 @@ const Shop = sequelize.define('Shop', {
     type: DataTypes.ENUM('Pending', 'Approved', 'Rejected'),
     defaultValue: 'Pending',
     allowNull: false
-  }
+  },
+  allow_explicit_products: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false }
 }, {
   timestamps: true,
   createdAt: 'created_at',

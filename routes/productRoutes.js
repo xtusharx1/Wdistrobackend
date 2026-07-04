@@ -7,6 +7,9 @@ const { Op, literal } = require('sequelize');
 const Product = require('../models/Product');
 const Shop = require('../models/Shop');
 const ProductVariationGroup = require('../models/ProductVariationGroup');
+const ProductCollection = require('../models/ProductCollection');
+const Category = require('../models/Category');
+const xlsx = require('xlsx');
 
 const router = express.Router();
 
@@ -288,9 +291,18 @@ const resolveCategories = (name, description, mainCategory, subCategory) => {
 
 // Create product
 router.post('/', async (req, res) => {
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active, is_clearance, clearance_price, is_featured } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, bypassDuplicateCheck, is_active, is_clearance, clearance_price, is_featured, billing_name, is_explicit_product } = req.body;
   if (!name || price === undefined || stock_quantity === undefined) {
     return res.status(400).json({ success: false, message: 'Name, price, and stock_quantity are required' });
+  }
+
+  const isExplicit = is_explicit_product === true || is_explicit_product === 'true';
+  let finalBillingName = null;
+  if (isExplicit) {
+    if (!billing_name || !billing_name.trim()) {
+      return res.status(400).json({ success: false, message: 'Billing Name is required for explicit products' });
+    }
+    finalBillingName = billing_name.trim();
   }
 
   const { mainCat, subCat } = resolveCategories(name, description, mainCategory || main_category, subCategory || sub_category || category);
@@ -319,18 +331,30 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const isClearance = is_clearance === true || is_clearance === 'true';
+    const { product_collection_id, deal_price } = req.body;
+    let parsedDealPrice = null;
+    let parsedCollId = null;
+    let isClearance = false;
     let parsedClearancePrice = null;
-    if (isClearance) {
-      if (clearance_price === undefined || clearance_price === null || clearance_price === '') {
-        return res.status(400).json({ success: false, message: 'Clearance price is required when product is marked as clearance.' });
+
+    if (product_collection_id !== undefined && product_collection_id !== null && product_collection_id !== '') {
+      parsedCollId = parseInt(product_collection_id);
+      if (deal_price === undefined || deal_price === null || deal_price === '') {
+        return res.status(400).json({ success: false, message: 'Deal price is required when a Product Collection is selected.' });
       }
-      parsedClearancePrice = parseFloat(clearance_price);
-      if (isNaN(parsedClearancePrice) || parsedClearancePrice <= 0) {
-        return res.status(400).json({ success: false, message: 'Clearance price must be greater than zero.' });
+      parsedDealPrice = parseFloat(deal_price);
+      if (isNaN(parsedDealPrice) || parsedDealPrice <= 0) {
+        return res.status(400).json({ success: false, message: 'Deal price must be greater than zero.' });
       }
-      if (parsedClearancePrice >= parseFloat(price)) {
-        return res.status(400).json({ success: false, message: 'Clearance price must be less than the regular selling price.' });
+      if (parsedDealPrice >= parseFloat(price)) {
+        return res.status(400).json({ success: false, message: 'Deal price must be less than the regular selling price.' });
+      }
+
+      // Sync legacy clearance fields for compatibility
+      const coll = await ProductCollection.findByPk(parsedCollId);
+      if (coll && coll.name.toLowerCase() === 'clearance') {
+        isClearance = true;
+        parsedClearancePrice = parsedDealPrice;
       }
     }
 
@@ -347,9 +371,13 @@ router.post('/', async (req, res) => {
       image_url,
       sku_id,
       description,
+      is_featured: is_featured === true || is_featured === 'true',
+      product_collection_id: parsedCollId,
+      deal_price: parsedDealPrice,
       is_clearance: isClearance,
       clearance_price: parsedClearancePrice,
-      is_featured: is_featured === true || is_featured === 'true'
+      billing_name: finalBillingName,
+      is_explicit_product: isExplicit
     });
     return res.status(201).json({ success: true, message: 'Product created successfully', data: { product } });
   } catch (err) {
@@ -408,10 +436,592 @@ router.post('/bulk', async (req, res) => {
   }
 });
 
+router.get('/import/template', async (req, res) => {
+  try {
+    const wb = xlsx.utils.book_new();
+
+    const productsData = [
+      {
+        'Product Name': 'Premium Glass Rig 10in',
+        'SKU': 'GR-10IN-PREM',
+        'Barcode': '810012345678',
+        'Category': 'Glass',
+        'Subcategory': 'Glass Rigs',
+        'Description': '10 inch premium borosilicate glass rig with percolator.',
+        'Purchase Cost': 15.50,
+        'Selling Price': 45.00,
+        'Deal Price': '',
+        'Product Collection': '',
+        'Stock Quantity': 50,
+        'Image URL': 'https://wdistro-assets.s3.amazonaws.com/rig.jpg',
+        'Featured Product': 'No',
+        'Explicit Product': 'No',
+        'Billing Name': '',
+        'Active': 'Yes'
+      },
+      {
+        'Product Name': 'Strawberry Disposable 5000 Puffs',
+        'SKU': 'VAPE-STRAW-5K',
+        'Barcode': '810012345689',
+        'Category': 'Vape',
+        'Subcategory': 'Disposable',
+        'Description': '5% Nicotine strawberry flavor rechargeable disposable vape.',
+        'Purchase Cost': 4.20,
+        'Selling Price': 14.99,
+        'Deal Price': 11.99,
+        'Product Collection': 'Deals',
+        'Stock Quantity': 200,
+        'Image URL': 'https://wdistro-assets.s3.amazonaws.com/vape.jpg',
+        'Featured Product': 'Yes',
+        'Explicit Product': 'No',
+        'Billing Name': '',
+        'Active': 'Yes'
+      },
+      {
+        'Product Name': 'Restricted Herbal Supplement',
+        'SKU': 'EXPLICIT-SUPP-01',
+        'Barcode': '810012345690',
+        'Category': 'General Merchandise',
+        'Subcategory': 'Supplements',
+        'Description': 'Restricted supplement for approved stores only.',
+        'Purchase Cost': 10.00,
+        'Selling Price': 29.99,
+        'Deal Price': '',
+        'Product Collection': '',
+        'Stock Quantity': 100,
+        'Image URL': 'https://wdistro-assets.s3.amazonaws.com/supp.jpg',
+        'Featured Product': 'No',
+        'Explicit Product': 'Yes',
+        'Billing Name': 'Herbal Remedy Pack',
+        'Active': 'Yes'
+      }
+    ];
+
+    const wsProducts = xlsx.utils.json_to_sheet(productsData, {
+      header: [
+        'Product Name', 'SKU', 'Barcode', 'Category', 'Subcategory',
+        'Description', 'Purchase Cost', 'Selling Price', 'Deal Price',
+        'Product Collection', 'Stock Quantity', 'Image URL',
+        'Featured Product', 'Explicit Product', 'Billing Name', 'Active'
+      ]
+    });
+
+    xlsx.utils.book_append_sheet(wb, wsProducts, 'Products');
+
+    const notesData = [
+      {
+        'Column Name': 'Product Name',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Product display name. Cannot be empty.'
+      },
+      {
+        'Column Name': 'SKU',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Unique product inventory code. Matches existing products to update if Update Existing is checked.'
+      },
+      {
+        'Column Name': 'Barcode',
+        'Required': 'No',
+        'Validation Rules & Description': 'Product barcode/UPC/EAN. Must be unique if supplied.'
+      },
+      {
+        'Column Name': 'Category',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Main category. Normalizes to closest existing match (ignores spacing, case, plurals) or creates a new one.'
+      },
+      {
+        'Column Name': 'Subcategory',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Subcategory name under Category. Normalizes to closest existing match or creates a new one.'
+      },
+      {
+        'Column Name': 'Description',
+        'Required': 'No',
+        'Validation Rules & Description': 'Product description details.'
+      },
+      {
+        'Column Name': 'Purchase Cost',
+        'Required': 'No',
+        'Validation Rules & Description': 'Internal purchase cost. Must be a positive decimal number.'
+      },
+      {
+        'Column Name': 'Selling Price',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Regular selling price. Must be a decimal number greater than 0.'
+      },
+      {
+        'Column Name': 'Deal Price',
+        'Required': 'No',
+        'Validation Rules & Description': 'Promotional price. Required if Product Collection is set. Must be less than Selling Price.'
+      },
+      {
+        'Column Name': 'Product Collection',
+        'Required': 'No',
+        'Validation Rules & Description': 'Deals, Clearance, New Arrival, etc. Normalizes to closest existing match or creates a new collection.'
+      },
+      {
+        'Column Name': 'Stock Quantity',
+        'Required': 'Yes',
+        'Validation Rules & Description': 'Initial inventory count. Must be a non-negative integer.'
+      },
+      {
+        'Column Name': 'Image URL',
+        'Required': 'No',
+        'Validation Rules & Description': 'Public link to the product image.'
+      },
+      {
+        'Column Name': 'Featured Product',
+        'Required': 'No',
+        'Validation Rules & Description': 'Must be "Yes" or "No". Default is No.'
+      },
+      {
+        'Column Name': 'Explicit Product',
+        'Required': 'No',
+        'Validation Rules & Description': 'Must be "Yes" or "No". Restricts visibility to authorized stores. Default is No.'
+      },
+      {
+        'Column Name': 'Billing Name',
+        'Required': 'No',
+        'Validation Rules & Description': 'Required ONLY if Explicit Product = Yes. Alternative name printed on customer-facing invoices.'
+      },
+      {
+        'Column Name': 'Active',
+        'Required': 'No',
+        'Validation Rules & Description': 'Must be "Yes" or "No". Default is Yes.'
+      }
+    ];
+
+    const wsNotes = xlsx.utils.json_to_sheet(notesData, {
+      header: ['Column Name', 'Required', 'Validation Rules & Description']
+    });
+
+    wsNotes['!cols'] = [
+      { wch: 20 },
+      { wch: 10 },
+      { wch: 100 }
+    ];
+
+    xlsx.utils.book_append_sheet(wb, wsNotes, 'Guidelines & Validation Notes');
+
+    const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Disposition', 'attachment; filename="wdistro_product_import_template.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    return res.send(buf);
+
+  } catch (err) {
+    console.error('Error generating import template:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+const memoryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+router.post('/import', memoryUpload.single('file'), async (req, res) => {
+  const updateExisting = req.body.updateExisting === 'true' || req.body.updateExisting === true;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, message: 'No import file provided.' });
+  }
+
+  try {
+    const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rows = xlsx.utils.sheet_to_json(sheet);
+
+    let totalRows = rows.length;
+    let productsCreated = 0;
+    let productsUpdated = 0;
+    let categoriesCreated = 0;
+    let categoriesNormalized = 0;
+    let subcategoriesCreated = 0;
+    let subcategoriesNormalized = 0;
+    let collectionsCreated = 0;
+    let collectionsNormalized = 0;
+    const failedRows = [];
+
+    // Load existing mapping collections
+    const existingCategoriesList = await Category.findAll();
+    const existingCollectionsList = await ProductCollection.findAll();
+
+    const categoriesMap = {};
+    existingCategoriesList.forEach(c => {
+      categoriesMap[c.category_name.toLowerCase()] = c;
+    });
+
+    const collectionsMap = {};
+    existingCollectionsList.forEach(c => {
+      collectionsMap[c.name.toLowerCase()] = c;
+    });
+
+    const textMatches = (str1, str2) => {
+      const n1 = cleanString(str1);
+      const n2 = cleanString(str2);
+      if (n1 === n2) return true;
+
+      const stripSuffixes = (s) => {
+        if (s.endsWith('ies')) return s.slice(0, -3) + 'y';
+        if (s.endsWith('s') && !s.endsWith('ss')) return s.slice(0, -1);
+        return s;
+      };
+      return stripSuffixes(n1) === stripSuffixes(n2);
+    };
+
+    const findClosestMatch = (input, existingMap, keys) => {
+      if (!input) return null;
+      
+      // Try direct match (with basic plural/singular normalization)
+      for (const key of keys) {
+        if (textMatches(input, key)) {
+          const isExact = input.toString().trim().toLowerCase() === key.toLowerCase();
+          return { match: existingMap[key], isExact };
+        }
+      }
+
+      // Try Levenshtein similarity match
+      let bestMatchKey = null;
+      let bestSim = 0;
+      for (const key of keys) {
+        const sim = getLevenshteinSimilarity(input, key);
+        if (sim >= 0.80 && sim > bestSim) {
+          bestSim = sim;
+          bestMatchKey = key;
+        }
+      }
+
+      if (bestMatchKey) {
+        return { match: existingMap[bestMatchKey], isExact: false };
+      }
+
+      return null;
+    };
+
+    const getRowVal = (row, fieldNames) => {
+      for (const key of Object.keys(row)) {
+        const normalizedKey = key.trim().toLowerCase().replace(/[_\-\s]+/g, '');
+        for (const name of fieldNames) {
+          const normalizedName = name.toLowerCase().replace(/[_\-\s]+/g, '');
+          if (normalizedKey === normalizedName) {
+            return row[key];
+          }
+        }
+      }
+      return undefined;
+    };
+
+    const seenSKUsInFile = new Set();
+    const seenBarcodesInFile = new Set();
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2;
+
+      const pName = getRowVal(row, ['Product Name', 'ProductName', 'Name']);
+      const pSku = getRowVal(row, ['SKU', 'SkuId', 'Sku']);
+      const pBarcode = getRowVal(row, ['Barcode', 'UPC', 'EAN']);
+      const pCategory = getRowVal(row, ['Category', 'Main Category', 'MainCategory']);
+      const pSubcategory = getRowVal(row, ['Subcategory', 'Sub Category', 'SubCategory']);
+      const pDesc = getRowVal(row, ['Description', 'Desc']);
+      const pCost = getRowVal(row, ['Purchase Cost', 'PurchaseCost', 'Cost']);
+      const pPrice = getRowVal(row, ['Selling Price', 'SellingPrice', 'Price']);
+      const pDealPrice = getRowVal(row, ['Deal Price', 'DealPrice']);
+      const pCollection = getRowVal(row, ['Product Collection', 'ProductCollection', 'Collection']);
+      const pStock = getRowVal(row, ['Stock Quantity', 'StockQuantity', 'Stock', 'Qty', 'Quantity']);
+      const pImage = getRowVal(row, ['Image URL', 'ImageUrl', 'Image']);
+      const pFeatured = getRowVal(row, ['Featured Product', 'FeaturedProduct', 'Featured']);
+      const pExplicit = getRowVal(row, ['Explicit Product', 'ExplicitProduct', 'Explicit']);
+      const pBillingName = getRowVal(row, ['Billing Name', 'BillingName']);
+      const pActive = getRowVal(row, ['Active', 'IsActive', 'Is Active']);
+
+      const addFailed = (reason) => {
+        failedRows.push({
+          rowNumber: rowNum,
+          productName: pName || 'Unknown Product',
+          errorReason: reason,
+          rowData: row
+        });
+      };
+
+      if (!pName || !pName.toString().trim()) {
+        addFailed('Product Name is required.');
+        continue;
+      }
+      if (!pSku || !pSku.toString().trim()) {
+        addFailed('SKU is required.');
+        continue;
+      }
+      if (!pCategory || !pCategory.toString().trim()) {
+        addFailed('Category is required.');
+        continue;
+      }
+      if (!pSubcategory || !pSubcategory.toString().trim()) {
+        addFailed('Subcategory is required.');
+        continue;
+      }
+      if (pPrice === undefined || pPrice === null || pPrice === '') {
+        addFailed('Selling Price is required.');
+        continue;
+      }
+      if (pStock === undefined || pStock === null || pStock === '') {
+        addFailed('Stock Quantity is required.');
+        continue;
+      }
+
+      const sellingPrice = parseFloat(pPrice);
+      if (isNaN(sellingPrice) || sellingPrice <= 0) {
+        addFailed('Selling Price must be a number greater than 0.');
+        continue;
+      }
+
+      const stockQty = parseInt(pStock, 10);
+      if (isNaN(stockQty) || stockQty < 0) {
+        addFailed('Stock Quantity cannot be negative.');
+        continue;
+      }
+
+      const skuTrim = pSku.toString().trim();
+      const skuLower = skuTrim.toLowerCase();
+      if (seenSKUsInFile.has(skuLower)) {
+        addFailed('Duplicate SKU in upload file.');
+        continue;
+      }
+      seenSKUsInFile.add(skuLower);
+
+      let barcodeVal = null;
+      if (pBarcode !== undefined && pBarcode !== null && pBarcode !== '') {
+        barcodeVal = pBarcode.toString().trim();
+        const barcodeLower = barcodeVal.toLowerCase();
+        if (seenBarcodesInFile.has(barcodeLower)) {
+          addFailed('Duplicate Barcode in upload file.');
+          continue;
+        }
+        seenBarcodesInFile.add(barcodeLower);
+
+        // Check unique barcode in database (must not belong to another product)
+        const barcodeExists = await Product.findOne({
+          where: {
+            sku_id: {
+              [Op.and]: [
+                { [Op.iLike]: barcodeVal },
+                { [Op.notILike]: skuTrim }
+              ]
+            }
+          }
+        });
+        if (barcodeExists) {
+          addFailed(`Barcode ${barcodeVal} is already assigned to another product.`);
+          continue;
+        }
+      }
+
+      // Check SKU uniqueness/existence
+      const existingProduct = await Product.findOne({
+        where: { sku_id: { [Op.iLike]: skuTrim } }
+      });
+
+      if (existingProduct && !updateExisting) {
+        addFailed(`Product SKU ${skuTrim} already exists.`);
+        continue;
+      }
+
+      let isFeatured = false;
+      if (pFeatured !== undefined && pFeatured !== null && pFeatured !== '') {
+        const val = pFeatured.toString().trim().toLowerCase();
+        if (val === 'yes') {
+          isFeatured = true;
+        } else if (val !== 'no') {
+          addFailed('Featured Product must be either Yes or No.');
+          continue;
+        }
+      }
+
+      let isActive = true;
+      if (pActive !== undefined && pActive !== null && pActive !== '') {
+        const val = pActive.toString().trim().toLowerCase();
+        if (val === 'no') {
+          isActive = false;
+        } else if (val !== 'yes') {
+          addFailed('Active must be either Yes or No.');
+          continue;
+        }
+      }
+
+      let isExplicit = false;
+      if (pExplicit !== undefined && pExplicit !== null && pExplicit !== '') {
+        const val = pExplicit.toString().trim().toLowerCase();
+        if (val === 'yes') {
+          isExplicit = true;
+        } else if (val !== 'no') {
+          addFailed('Explicit Product must be either Yes or No.');
+          continue;
+        }
+      }
+
+      let billingName = null;
+      if (isExplicit) {
+        if (!pBillingName || !pBillingName.toString().trim()) {
+          addFailed('Billing Name is required for explicit products.');
+          continue;
+        }
+        billingName = pBillingName.toString().trim();
+      }
+
+      let dealPrice = null;
+      if (pDealPrice !== undefined && pDealPrice !== null && pDealPrice !== '') {
+        dealPrice = parseFloat(pDealPrice);
+        if (isNaN(dealPrice) || dealPrice <= 0) {
+          addFailed('Deal Price must be a number greater than 0.');
+          continue;
+        }
+        if (dealPrice >= sellingPrice) {
+          addFailed('Deal Price must be less than Selling Price.');
+          continue;
+        }
+      }
+
+      let collectionId = null;
+      if (pCollection && pCollection.toString().trim()) {
+        const collName = pCollection.toString().trim();
+        const matchResult = findClosestMatch(collName, collectionsMap, Object.keys(collectionsMap));
+        let matchedCollection = null;
+        if (matchResult) {
+          matchedCollection = matchResult.match;
+          if (!matchResult.isExact) {
+            collectionsNormalized++;
+          }
+        } else {
+          matchedCollection = await ProductCollection.create({ name: collName, is_active: true });
+          collectionsMap[collName.toLowerCase()] = matchedCollection;
+          collectionsCreated++;
+        }
+        collectionId = matchedCollection.id;
+
+        if (dealPrice === null) {
+          addFailed('Deal Price is required when a Product Collection is selected.');
+          continue;
+        }
+      }
+
+      if (dealPrice !== null && !collectionId) {
+        addFailed('Product Collection is required if Deal Price is provided.');
+        continue;
+      }
+
+      // Resolve Category and Subcategory
+      const catName = pCategory.toString().trim();
+      const matchCatResult = findClosestMatch(catName, categoriesMap, Object.keys(categoriesMap));
+      let matchedCategory = null;
+
+      if (matchCatResult) {
+        matchedCategory = matchCatResult.match;
+        if (!matchCatResult.isExact) {
+          categoriesNormalized++;
+        }
+      } else {
+        matchedCategory = await Category.create({
+          category_name: catName,
+          sub_categories: [pSubcategory.toString().trim()],
+          is_active: true
+        });
+        categoriesMap[catName.toLowerCase()] = matchedCategory;
+        categoriesCreated++;
+      }
+
+      const subName = pSubcategory.toString().trim();
+      const existingSubMap = {};
+      const subKeys = (matchedCategory.sub_categories || []).map(s => {
+        existingSubMap[s.toLowerCase()] = s;
+        return s.toLowerCase();
+      });
+
+      const matchSubResult = findClosestMatch(subName, existingSubMap, subKeys);
+      let resolvedSubName = null;
+
+      if (matchSubResult) {
+        resolvedSubName = matchSubResult.match;
+        const isExact = subName.toLowerCase() === resolvedSubName.toLowerCase();
+        if (!isExact) {
+          subcategoriesNormalized++;
+        }
+      } else {
+        resolvedSubName = subName;
+        const updatedSubs = [...(matchedCategory.sub_categories || []), resolvedSubName];
+        matchedCategory.sub_categories = updatedSubs;
+        await matchedCategory.save();
+        subcategoriesCreated++;
+      }
+
+      const requiredLicense = (matchedCategory.category_name === 'Tobacco' || matchedCategory.category_name === 'Vape') ? 'Tobacco License' : 'Seller Permit';
+
+      const isClearance = Boolean(pCollection) && pCollection.toString().trim().toLowerCase() === 'clearance';
+
+      const productPayload = {
+        name: pName.toString().trim(),
+        sku_id: barcodeVal || skuTrim, // Store barcode if provided, otherwise SKU
+        price: sellingPrice,
+        purchase_cost: pCost !== undefined && pCost !== null && pCost !== '' ? parseFloat(pCost) : null,
+        category: resolvedSubName,
+        main_category: matchedCategory.category_name,
+        sub_category: resolvedSubName,
+        required_license: requiredLicense,
+        stock_quantity: stockQty,
+        description: pDesc ? pDesc.toString().trim() : null,
+        is_active: isActive,
+        is_featured: isFeatured,
+        product_collection_id: collectionId,
+        deal_price: dealPrice,
+        billing_name: billingName,
+        is_explicit_product: isExplicit,
+        image_url: pImage ? pImage.toString().trim() : null,
+        is_clearance: isClearance,
+        clearance_price: isClearance ? dealPrice : null
+      };
+
+      try {
+        if (existingProduct) {
+          await existingProduct.update(productPayload);
+          productsUpdated++;
+        } else {
+          await Product.create(productPayload);
+          productsCreated++;
+        }
+      } catch (dbErr) {
+        addFailed(`Database error: ${dbErr.message}`);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Product import process finished.',
+      summary: {
+        totalRows,
+        productsCreated,
+        productsUpdated,
+        categoriesCreated,
+        categoriesNormalized,
+        subcategoriesCreated,
+        subcategoriesNormalized,
+        collectionsCreated,
+        collectionsNormalized,
+        failedRowsCount: failedRows.length
+      },
+      failedRows
+    });
+
+  } catch (err) {
+    console.error('Import processing error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to process import file.' });
+  }
+});
+
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active, clearance } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active, collection_id } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
@@ -441,13 +1051,14 @@ router.get('/', async (req, res) => {
       whereClause.is_active = false;
     }
 
-    // Clearance filter: ?clearance=true → only clearance, ?clearance=false → only regular
-    if (clearance === 'true') {
-      whereClause.is_clearance = true;
-    } else if (clearance === 'false') {
-      whereClause.is_clearance = false;
+    // Collection filter: ?collection_id=none -> without collection, ?collection_id=ID -> specific collection
+    if (collection_id === 'none') {
+      whereClause.product_collection_id = null;
+    } else if (collection_id && collection_id !== 'All') {
+      whereClause.product_collection_id = parseInt(collection_id);
     }
 
+    let allowExplicit = false;
     if (shopId) {
       whereClause.is_active = true;
       const shop = await Shop.findByPk(shopId);
@@ -460,7 +1071,14 @@ router.get('/', async (req, res) => {
           allowedLicenses.push('Tobacco License');
         }
         whereClause.required_license = { [Op.in]: allowedLicenses };
+        if (shop.allow_explicit_products) {
+          allowExplicit = true;
+        }
       }
+    }
+
+    if (!allowExplicit && shopId) {
+      whereClause.is_explicit_product = false;
     }
 
     let orderClause = [['created_at', 'DESC']];
@@ -481,7 +1099,10 @@ router.get('/', async (req, res) => {
 
     const options = {
       where: whereClause,
-      order: orderClause
+      order: orderClause,
+      include: [
+        { model: ProductCollection, as: 'ProductCollection', attributes: ['id', 'name', 'is_active'] }
+      ]
     };
 
     if (limit) {
@@ -543,6 +1164,9 @@ router.get('/scan/:code', async (req, res) => {
     if (shopId) {
       const shop = await Shop.findByPk(shopId);
       if (shop) {
+        if (product.is_explicit_product && !shop.allow_explicit_products) {
+          return res.status(403).json({ success: false, message: 'Explicit products are not allowed for this store.' });
+        }
         if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
           return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
         }
@@ -571,6 +1195,7 @@ router.get('/featured', async (req, res) => {
   try {
     const whereClause = { is_featured: true, is_active: true };
 
+    let allowExplicit = false;
     if (shopId) {
       const shop = await Shop.findByPk(shopId);
       if (shop) {
@@ -578,7 +1203,14 @@ router.get('/featured', async (req, res) => {
         if (shop.seller_permit && shop.approved) allowedLicenses.push('Seller Permit');
         if (shop.tobacco_license && shop.approved) allowedLicenses.push('Tobacco License');
         whereClause.required_license = { [Op.in]: allowedLicenses };
+        if (shop.allow_explicit_products) {
+          allowExplicit = true;
+        }
       }
+    }
+
+    if (!allowExplicit && shopId) {
+      whereClause.is_explicit_product = false;
     }
 
     const products = await Product.findAll({
@@ -609,7 +1241,11 @@ router.get('/:id', async (req, res) => {
   const userRole = req.headers['x-user-role'];
 
   try {
-    const product = await Product.findByPk(id);
+    const product = await Product.findByPk(id, {
+      include: [
+        { model: ProductCollection, as: 'ProductCollection', attributes: ['id', 'name', 'is_active'] }
+      ]
+    });
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
@@ -617,6 +1253,9 @@ router.get('/:id', async (req, res) => {
     if (shopId) {
       const shop = await Shop.findByPk(shopId);
       if (shop) {
+        if (product.is_explicit_product && !shop.allow_explicit_products) {
+          return res.status(403).json({ success: false, message: 'Explicit products are not allowed for this store.' });
+        }
         if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
           return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
         }
@@ -649,6 +1288,9 @@ router.get('/:id', async (req, res) => {
             if (variantShop.seller_permit && variantShop.approved) allowedLicenses.push('Seller Permit');
             if (variantShop.tobacco_license && variantShop.approved) allowedLicenses.push('Tobacco License');
             variantWhere.required_license = { [Op.in]: allowedLicenses };
+            if (!variantShop.allow_explicit_products) {
+              variantWhere.is_explicit_product = false;
+            }
           }
         }
         const variantProducts = await Product.findAll({ where: variantWhere });
@@ -673,12 +1315,34 @@ router.get('/:id', async (req, res) => {
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active, is_clearance, clearance_price, is_featured } = req.body;
+  const { name, price, purchase_cost, category, main_category, mainCategory, sub_category, subCategory, required_license, requiredLicense, stock_quantity, image_url, sku_id, description, is_active, is_featured, product_collection_id, deal_price, billing_name, is_explicit_product } = req.body;
 
   try {
     const product = await Product.findByPk(id);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    let targetIsExplicit = product.is_explicit_product;
+    if (is_explicit_product !== undefined) {
+      targetIsExplicit = is_explicit_product === true || is_explicit_product === 'true';
+    }
+
+    if (targetIsExplicit) {
+      if (billing_name !== undefined) {
+        if (!billing_name || !billing_name.trim()) {
+          return res.status(400).json({ success: false, message: 'Billing Name is required for explicit products' });
+        }
+        product.billing_name = billing_name.trim();
+      } else {
+        if (!product.billing_name || !product.billing_name.trim()) {
+          return res.status(400).json({ success: false, message: 'Billing Name is required for explicit products' });
+        }
+      }
+      product.is_explicit_product = true;
+    } else {
+      product.is_explicit_product = false;
+      product.billing_name = null;
     }
 
     if (name) product.name = name;
@@ -713,33 +1377,69 @@ router.patch('/:id', async (req, res) => {
     if (image_url !== undefined) product.image_url = image_url;
     if (description !== undefined) product.description = description;
 
-    // Clearance fields
-    if (is_clearance !== undefined) {
-      const isClearance = is_clearance === true || is_clearance === 'true';
-      product.is_clearance = isClearance;
-      if (!isClearance) {
+    // Collection fields
+    if (product_collection_id !== undefined) {
+      if (product_collection_id === null || product_collection_id === '') {
+        product.product_collection_id = null;
+        product.deal_price = null;
+        product.is_clearance = false;
         product.clearance_price = null;
-      } else if (clearance_price !== undefined && clearance_price !== null) {
-        product.clearance_price = parseFloat(clearance_price);
+      } else {
+        product.product_collection_id = parseInt(product_collection_id);
+        const finalDealPrice = deal_price !== undefined ? deal_price : product.deal_price;
+        if (finalDealPrice === undefined || finalDealPrice === null || finalDealPrice === '') {
+          return res.status(400).json({ success: false, message: 'Deal price is required when a Product Collection is selected.' });
+        }
+        const parsedDeal = parseFloat(finalDealPrice);
+        if (isNaN(parsedDeal) || parsedDeal <= 0) {
+          return res.status(400).json({ success: false, message: 'Deal price must be greater than zero.' });
+        }
+        if (parsedDeal >= product.price) {
+          return res.status(400).json({ success: false, message: 'Deal price must be less than the regular selling price.' });
+        }
+        product.deal_price = parsedDeal;
+
+        // Auto sync legacy fields for safety
+        const coll = await ProductCollection.findByPk(product.product_collection_id);
+        if (coll && coll.name.toLowerCase() === 'clearance') {
+          product.is_clearance = true;
+          product.clearance_price = parsedDeal;
+        } else {
+          product.is_clearance = false;
+          product.clearance_price = null;
+        }
       }
-    } else if (clearance_price !== undefined) {
-      product.clearance_price = clearance_price !== null ? parseFloat(clearance_price) : null;
+    } else if (deal_price !== undefined) {
+      if (product.product_collection_id) {
+        if (deal_price === null || deal_price === '') {
+          return res.status(400).json({ success: false, message: 'Deal price is required when a Product Collection is selected.' });
+        }
+        const parsedDeal = parseFloat(deal_price);
+        if (isNaN(parsedDeal) || parsedDeal <= 0) {
+          return res.status(400).json({ success: false, message: 'Deal price must be greater than zero.' });
+        }
+        if (parsedDeal >= product.price) {
+          return res.status(400).json({ success: false, message: 'Deal price must be less than the regular selling price.' });
+        }
+        product.deal_price = parsedDeal;
+
+        // Auto sync legacy fields for safety
+        const coll = await ProductCollection.findByPk(product.product_collection_id);
+        if (coll && coll.name.toLowerCase() === 'clearance') {
+          product.is_clearance = true;
+          product.clearance_price = parsedDeal;
+        } else {
+          product.is_clearance = false;
+          product.clearance_price = null;
+        }
+      } else {
+        product.deal_price = null;
+        product.is_clearance = false;
+        product.clearance_price = null;
+      }
     }
 
     if (is_featured !== undefined) product.is_featured = is_featured === true || is_featured === 'true';
-
-    // Validate final clearance state before saving
-    if (product.is_clearance) {
-      if (product.clearance_price === null || product.clearance_price === undefined) {
-        return res.status(400).json({ success: false, message: 'Clearance price is required when product is marked as clearance.' });
-      }
-      if (product.clearance_price <= 0) {
-        return res.status(400).json({ success: false, message: 'Clearance price must be greater than zero.' });
-      }
-      if (product.clearance_price >= product.price) {
-        return res.status(400).json({ success: false, message: 'Clearance price must be less than the regular selling price.' });
-      }
-    }
 
     await product.save();
     return res.json({ success: true, message: 'Product updated successfully', data: { product } });

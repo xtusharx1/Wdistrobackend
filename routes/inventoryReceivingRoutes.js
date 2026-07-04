@@ -26,6 +26,10 @@ const upload = multer({
     metadata: (req, file, cb) => {
       cb(null, { fieldName: file.fieldname });
     },
+    contentType: (req, file, cb) => {
+      cb(null, file.mimetype);
+    },
+    contentDisposition: 'inline',
     key: (req, file, cb) => {
       const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
       cb(null, 'invoices/' + uniqueSuffix + path.extname(file.originalname));
@@ -100,21 +104,18 @@ router.post('/', checkAdminOrSeller, async (req, res) => {
 
   try {
     const result = await sequelize.transaction(async (t) => {
-      // Lock the table to prevent concurrent ID generation issues
-      await sequelize.query('LOCK TABLE "InventoryReceipts" IN EXCLUSIVE MODE', { transaction: t });
-
-      // Find the next unique receipt number
-      const maxIdResult = await InventoryReceipt.max('id', { transaction: t });
-      const nextId = (maxIdResult || 0) + 1;
-      const receiptNumber = `GRN-${String(nextId).padStart(6, '0')}`;
-
-      // 1. Create the Receipt record
+      // 1. Create the Receipt record with a unique temporary receipt_number to satisfy uniqueness and non-nullability constraints
+      const tempReceiptNumber = `TEMP-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
       const receipt = await InventoryReceipt.create({
-        receipt_number: receiptNumber,
+        receipt_number: tempReceiptNumber,
         invoice_url: invoice_url || null,
         remarks: remarks || null,
         received_by_user_id: parseInt(userId)
       }, { transaction: t });
+
+      // 2. Generate the final receipt number from the auto-generated ID and save it before committing
+      receipt.receipt_number = `GRN-${String(receipt.id).padStart(6, '0')}`;
+      await receipt.save({ transaction: t });
 
       const receiptItems = [];
 
