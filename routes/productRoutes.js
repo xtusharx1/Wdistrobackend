@@ -444,7 +444,6 @@ router.get('/import/template', async (req, res) => {
       {
         'Product Name': 'Premium Glass Rig 10in',
         'SKU': 'GR-10IN-PREM',
-        'Barcode': '810012345678',
         'Category': 'Glass',
         'Subcategory': 'Glass Rigs',
         'Description': '10 inch premium borosilicate glass rig with percolator.',
@@ -462,7 +461,6 @@ router.get('/import/template', async (req, res) => {
       {
         'Product Name': 'Strawberry Disposable 5000 Puffs',
         'SKU': 'VAPE-STRAW-5K',
-        'Barcode': '810012345689',
         'Category': 'Vape',
         'Subcategory': 'Disposable',
         'Description': '5% Nicotine strawberry flavor rechargeable disposable vape.',
@@ -480,7 +478,6 @@ router.get('/import/template', async (req, res) => {
       {
         'Product Name': 'Restricted Herbal Supplement',
         'SKU': 'EXPLICIT-SUPP-01',
-        'Barcode': '810012345690',
         'Category': 'General Merchandise',
         'Subcategory': 'Supplements',
         'Description': 'Restricted supplement for approved stores only.',
@@ -499,7 +496,7 @@ router.get('/import/template', async (req, res) => {
 
     const wsProducts = xlsx.utils.json_to_sheet(productsData, {
       header: [
-        'Product Name', 'SKU', 'Barcode', 'Category', 'Subcategory',
+        'Product Name', 'SKU', 'Category', 'Subcategory',
         'Description', 'Purchase Cost', 'Selling Price', 'Deal Price',
         'Product Collection', 'Stock Quantity', 'Image URL',
         'Featured Product', 'Explicit Product', 'Billing Name', 'Active'
@@ -518,11 +515,6 @@ router.get('/import/template', async (req, res) => {
         'Column Name': 'SKU',
         'Required': 'Yes',
         'Validation Rules & Description': 'Unique product inventory code. Matches existing products to update if Update Existing is checked.'
-      },
-      {
-        'Column Name': 'Barcode',
-        'Required': 'No',
-        'Validation Rules & Description': 'Product barcode/UPC/EAN. Must be unique if supplied.'
       },
       {
         'Column Name': 'Category',
@@ -714,7 +706,6 @@ router.post('/import', memoryUpload.single('file'), async (req, res) => {
     };
 
     const seenSKUsInFile = new Set();
-    const seenBarcodesInFile = new Set();
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -722,7 +713,6 @@ router.post('/import', memoryUpload.single('file'), async (req, res) => {
 
       const pName = getRowVal(row, ['Product Name', 'ProductName', 'Name']);
       const pSku = getRowVal(row, ['SKU', 'SkuId', 'Sku']);
-      const pBarcode = getRowVal(row, ['Barcode', 'UPC', 'EAN']);
       const pCategory = getRowVal(row, ['Category', 'Main Category', 'MainCategory']);
       const pSubcategory = getRowVal(row, ['Subcategory', 'Sub Category', 'SubCategory']);
       const pDesc = getRowVal(row, ['Description', 'Desc']);
@@ -791,32 +781,7 @@ router.post('/import', memoryUpload.single('file'), async (req, res) => {
       }
       seenSKUsInFile.add(skuLower);
 
-      let barcodeVal = null;
-      if (pBarcode !== undefined && pBarcode !== null && pBarcode !== '') {
-        barcodeVal = pBarcode.toString().trim();
-        const barcodeLower = barcodeVal.toLowerCase();
-        if (seenBarcodesInFile.has(barcodeLower)) {
-          addFailed('Duplicate Barcode in upload file.');
-          continue;
-        }
-        seenBarcodesInFile.add(barcodeLower);
 
-        // Check unique barcode in database (must not belong to another product)
-        const barcodeExists = await Product.findOne({
-          where: {
-            sku_id: {
-              [Op.and]: [
-                { [Op.iLike]: barcodeVal },
-                { [Op.notILike]: skuTrim }
-              ]
-            }
-          }
-        });
-        if (barcodeExists) {
-          addFailed(`Barcode ${barcodeVal} is already assigned to another product.`);
-          continue;
-        }
-      }
 
       // Check SKU uniqueness/existence
       const existingProduct = await Product.findOne({
@@ -961,7 +926,7 @@ router.post('/import', memoryUpload.single('file'), async (req, res) => {
 
       const productPayload = {
         name: pName.toString().trim(),
-        sku_id: barcodeVal || skuTrim, // Store barcode if provided, otherwise SKU
+        sku_id: skuTrim,
         price: sellingPrice,
         purchase_cost: pCost !== undefined && pCost !== null && pCost !== '' ? parseFloat(pCost) : null,
         category: resolvedSubName,
