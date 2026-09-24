@@ -193,7 +193,19 @@ const generateInvoicePDFBuffer = (order, shop) => {
       doc.text(name, 88, position + (rowHeight - textHeight) / 2, { width: 180 });
       
       const valOffset = position + (rowHeight - 9) / 2;
-      doc.text(skuId, 270, valOffset, { width: 70 });
+      
+      // SKU: always render on a single line — shrink font if too wide for the column
+      const skuColWidth = 70;
+      doc.fontSize(9).font('Helvetica');
+      const skuTextWidth = doc.widthOfString(skuId);
+      let skuFontSize = 9;
+      if (skuTextWidth > skuColWidth) {
+        skuFontSize = Math.max(5.5, (9 * skuColWidth) / skuTextWidth);
+        doc.fontSize(skuFontSize);
+      }
+      const skuValOffset = position + (rowHeight - skuFontSize) / 2;
+      doc.text(skuId, 270, skuValOffset, { width: skuColWidth, lineBreak: false });
+      doc.fontSize(9).font('Helvetica'); // restore for subsequent columns
       doc.text(String(appQty), 340, valOffset, { width: 40, align: 'right' });
       doc.text(`$${finalPrice.toFixed(2)}`, 390, valOffset, { width: 80, align: 'right' });
       doc.text(`$${total.toFixed(2)}`, 480, valOffset, { width: 72, align: 'right' });
