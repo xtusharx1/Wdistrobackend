@@ -70,7 +70,8 @@ const generateInvoicePDFBuffer = (order, shop) => {
     const drawTableHeader = (y) => {
       doc.rect(MARGIN_LEFT, y, CONTENT_WIDTH, 22).fill('#002d72');
       doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
-      doc.text('Product Name', 60, y + 7, { width: 210 });
+      doc.text('S.No.', 55, y + 7, { width: 30 });
+      doc.text('Product Name', 88, y + 7, { width: 180 });
       doc.text('SKU ID', 270, y + 7, { width: 70 });
       doc.text('Qty', 340, y + 7, { width: 40, align: 'right' });
       doc.text('Unit Price', 390, y + 7, { width: 80, align: 'right' });
@@ -176,7 +177,7 @@ const generateInvoicePDFBuffer = (order, shop) => {
       
       // Calculate dynamic row height based on wrapped name string height
       doc.fontSize(9).font('Helvetica');
-      const textHeight = doc.heightOfString(name, { width: 210 });
+      const textHeight = doc.heightOfString(name, { width: 180 });
       const rowHeight = Math.max(22, textHeight + 10);
       
       // ── Page break check ──
@@ -190,7 +191,9 @@ const generateInvoicePDFBuffer = (order, shop) => {
       
       // Text drawing
       doc.fillColor('#1e293b');
-      doc.text(name, 60, position + (rowHeight - textHeight) / 2, { width: 210 });
+      const serialNo = index + 1;
+      doc.text(String(serialNo), 55, position + (rowHeight - 9) / 2, { width: 30 });
+      doc.text(name, 88, position + (rowHeight - textHeight) / 2, { width: 180 });
       
       const valOffset = position + (rowHeight - 9) / 2;
       doc.text(skuId, 270, valOffset, { width: 70 });
