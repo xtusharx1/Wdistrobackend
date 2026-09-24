@@ -153,12 +153,10 @@ const generateInvoicePDFBuffer = (order, shop) => {
     doc.fillColor('#002d72').fontSize(10).font('Helvetica-Bold').text('BILL TO', 50, billToY);
     doc.fillColor('#0f172a').fontSize(11).font('Helvetica-Bold').text(shop.shop_name, 50, billToY + 15);
     doc.font('Helvetica').fontSize(9).fillColor('#334155');
-    doc.text(`Contact: ${shop.owner_name}`, 50, billToY + 30);
-    doc.text(`Phone: ${shop.contact_details || 'N/A'}`, 50, billToY + 42);
-    doc.text(`Address: ${[shop.address, shop.city, shop.state, shop.zip].filter(Boolean).join(', ') || 'N/A'}`, 50, billToY + 54, { width: 350 });
-    doc.text(`Seller Permit: ${shop.seller_permit || 'N/A'}`, 50, billToY + 66);
+    doc.text(`Address: ${[shop.address, shop.city, shop.state, shop.zip].filter(Boolean).join(', ') || 'N/A'}`, 50, billToY + 30, { width: 350 });
+    doc.text(`Seller Permit: ${shop.seller_permit || 'N/A'}`, 50, billToY + 44);
     if (shop.tobacco_license) {
-      doc.text(`Tobacco License: ${shop.tobacco_license}`, 50, billToY + 78);
+      doc.text(`Tobacco License: ${shop.tobacco_license}`, 50, billToY + 56);
     }
 
     // 6a. Watermark (drawn behind content on page 1)
@@ -168,7 +166,7 @@ const generateInvoicePDFBuffer = (order, shop) => {
     drawFooter();
 
     // 7. Itemized Product Table
-    const tableTop = 295;
+    const tableTop = 260;
     let position = drawTableHeader(tableTop);
     
     doc.fontSize(9).font('Helvetica');
