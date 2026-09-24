@@ -42,11 +42,9 @@ const generateInvoicePDFBuffer = (order, shop) => {
     const MARGIN_LEFT = 50;
     const MARGIN_RIGHT = 50;
     const CONTENT_WIDTH = PAGE_WIDTH - MARGIN_LEFT - MARGIN_RIGHT; // 512
-    // Reserve space at the bottom for the footer (footer starts at footerTop)
-    const FOOTER_HEIGHT = 72; // footer takes ~52pt of content + padding above
-    const PAGE_BOTTOM = PAGE_HEIGHT - 30; // bottom margin
-    // Maximum Y position for table content before we must break to a new page
-    const MAX_TABLE_Y = PAGE_BOTTOM - FOOTER_HEIGHT;
+    const PAGE_BOTTOM = PAGE_HEIGHT - 30; // bottom margin (762pt)
+    // Maximum Y for product table rows — small margin so rows don't touch the absolute page edge
+    const MAX_TABLE_Y = PAGE_BOTTOM - 20; // 742pt
 
     const doc = new PDFDocument({ margins: { top: 40, bottom: 30, left: 50, right: 50 }, size: 'LETTER', autoFirstPage: true });
     const buffers = [];
@@ -164,8 +162,7 @@ const generateInvoicePDFBuffer = (order, shop) => {
     
     doc.fontSize(9).font('Helvetica');
     
-    // Space needed for the totals section after the last product row
-    const TOTALS_HEIGHT = 60; // 15 (gap) + 1 (line) + 10 (gap) + 15 (subtotal) + 15 (line+gap) + ~20 (grand total)
+
 
     (order.OrderItems || []).forEach((item, index) => {
       const name = item.Product?.billing_name || item.Product?.name || `Product #${item.product_id}`;
@@ -208,8 +205,12 @@ const generateInvoicePDFBuffer = (order, shop) => {
     });
 
     // 8. Totals Section
-    // Check if totals fit on the current page; if not, add a new page
-    if (position + TOTALS_HEIGHT > MAX_TABLE_Y) {
+    // Accurately check if totals + footer fit on the current page.
+    // Totals section uses 73pt (15+10+15+8+25). Footer placed at max(posAfterTotals+10, 720)
+    // and occupies ~42pt. Only create a new page if they genuinely don't fit.
+    const posAfterTotals = position + 73;
+    const estFooterTop = Math.max(posAfterTotals + 10, 720);
+    if (estFooterTop + 42 > PAGE_BOTTOM) {
       doc.addPage();
       doc.rect(0, 0, PAGE_WIDTH, 10).fill('#002d72');
       drawWatermark();
