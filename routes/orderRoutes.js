@@ -100,6 +100,9 @@ router.post('/', async (req, res) => {
     if (!shop) {
       return res.status(404).json({ success: false, message: 'Shop not found' });
     }
+    if (!shop.approved) {
+      return res.status(400).json({ success: false, message: 'Orders can only be created for approved stores' });
+    }
 
     // Validate all items & stock server-side
     const validatedProducts = [];
