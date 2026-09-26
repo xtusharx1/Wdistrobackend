@@ -1283,6 +1283,158 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// ── Bulk Update Product Variations (Limited to variations of ONE product) ──
+const handleBulkUpdateVariations = async (req, res) => {
+  const { product_ids, updates } = req.body;
+
+  if (!Array.isArray(product_ids) || product_ids.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'product_ids must be a non-empty array of variation product IDs.',
+    });
+  }
+
+  if (!updates || typeof updates !== 'object') {
+    return res.status(400).json({
+      success: false,
+      message: 'updates object is required.',
+    });
+  }
+
+  try {
+    const targetIds = product_ids.map(Number);
+    const products = await Product.findAll({
+      where: { id: { [Op.in]: targetIds } },
+    });
+
+    if (products.length !== targetIds.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'One or more selected variation products were not found.',
+      });
+    }
+
+    // Backend validation: Ensure every variation belongs to the SAME variation group
+    const allGroups = await ProductVariationGroup.findAll();
+    const groupMap = {};
+
+    for (const p of products) {
+      const matchingGroup = allGroups.find(g =>
+        (g.product_ids || []).map(Number).includes(p.id)
+      );
+      if (!matchingGroup) {
+        return res.status(400).json({
+          success: false,
+          message: 'Bulk update can only be performed on variations of the same product.',
+        });
+      }
+      groupMap[p.id] = matchingGroup;
+    }
+
+    const firstGroupId = groupMap[products[0].id].id;
+    const firstGroupName = groupMap[products[0].id].group_name;
+    const mixedGroup = products.some(p => groupMap[p.id].id !== firstGroupId);
+
+    if (mixedGroup) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bulk update can only be performed on variations of the same product.',
+      });
+    }
+
+    // Apply updates to each selected variation
+    const updatedProducts = [];
+    for (const product of products) {
+      if (updates.price !== undefined && updates.price !== '') {
+        const p = parseFloat(updates.price);
+        if (!isNaN(p) && p >= 0) product.price = p;
+      }
+
+      if (updates.purchase_cost !== undefined) {
+        if (updates.purchase_cost === '' || updates.purchase_cost === null) {
+          product.purchase_cost = null;
+        } else {
+          const pc = parseFloat(updates.purchase_cost);
+          if (!isNaN(pc)) product.purchase_cost = pc;
+        }
+      }
+
+      if (updates.stock_quantity !== undefined && updates.stock_quantity !== '') {
+        const sq = parseInt(updates.stock_quantity, 10);
+        if (!isNaN(sq) && sq >= 0) {
+          product.stock_quantity = sq;
+          if (updates.is_active === undefined) {
+            product.is_active = sq > 0;
+          }
+        }
+      }
+
+      if (updates.is_active !== undefined) {
+        product.is_active = updates.is_active === true || updates.is_active === 'true';
+      }
+
+      if (updates.product_collection_id !== undefined) {
+        if (updates.product_collection_id === null || updates.product_collection_id === '' || updates.product_collection_id === 'none') {
+          product.product_collection_id = null;
+          product.deal_price = null;
+          product.is_clearance = false;
+          product.clearance_price = null;
+        } else {
+          product.product_collection_id = parseInt(updates.product_collection_id, 10);
+          if (updates.deal_price !== undefined && updates.deal_price !== '') {
+            const dp = parseFloat(updates.deal_price);
+            if (!isNaN(dp) && dp > 0) product.deal_price = dp;
+          }
+          const coll = await ProductCollection.findByPk(product.product_collection_id);
+          if (coll && coll.name.toLowerCase() === 'clearance') {
+            product.is_clearance = true;
+            product.clearance_price = product.deal_price || product.price;
+          } else {
+            product.is_clearance = false;
+            product.clearance_price = null;
+          }
+        }
+      } else if (updates.deal_price !== undefined) {
+        if (updates.deal_price === '' || updates.deal_price === null) {
+          product.deal_price = null;
+          if (product.is_clearance) {
+            product.clearance_price = null;
+            product.is_clearance = false;
+          }
+        } else {
+          const dp = parseFloat(updates.deal_price);
+          if (!isNaN(dp) && dp > 0) {
+            product.deal_price = dp;
+            if (product.is_clearance) {
+              product.clearance_price = dp;
+            }
+          }
+        }
+      }
+
+      await product.save();
+      updatedProducts.push(product.toJSON());
+    }
+
+    return res.json({
+      success: true,
+      message: `Successfully updated ${updatedProducts.length} variations for "${firstGroupName}".`,
+      data: {
+        group_id: firstGroupId,
+        group_name: firstGroupName,
+        count: updatedProducts.length,
+        products: updatedProducts,
+      },
+    });
+  } catch (err) {
+    console.error('Error in bulk update variations:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+router.patch('/bulk-update', handleBulkUpdateVariations);
+router.post('/bulk-update', handleBulkUpdateVariations);
+
 // Update product
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;

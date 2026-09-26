@@ -9,6 +9,7 @@ const sequelize = require('../config/db');
 const StockMovement = require('../models/StockMovement');
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const OrderEditLog = require('../models/OrderEditLog');
+const InvoicePaymentHistory = require('../models/InvoicePaymentHistory');
 const User = require('../models/User');
 
 const router = express.Router();
@@ -363,7 +364,7 @@ router.patch('/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
-  const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed', 'cancelled'];
+  const validStatuses = ['pending', 'approved', 'processed', 'dispatched', 'delivered', 'completed', 'cancelled', 'rejected'];
   if (!status || !validStatuses.includes(status)) {
     return res.status(400).json({ success: false, message: `Valid status (${validStatuses.join(', ')}) is required` });
   }
@@ -384,9 +385,9 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    if (status === 'cancelled') {
-      if (order.status === 'cancelled') {
-        return res.status(400).json({ success: false, message: 'Order is already cancelled' });
+    if (status === 'cancelled' || status === 'rejected') {
+      if (order.status === status) {
+        return res.status(400).json({ success: false, message: `Order is already ${status}` });
       }
 
       const previousStatus = order.status;
@@ -419,18 +420,18 @@ router.patch('/:id/status', async (req, res) => {
                   previous_stock: prevStock,
                   new_stock: product.stock_quantity,
                   order_id: order.id,
-                  action: 'Cancellation'
+                  action: status === 'rejected' ? 'Rejection' : 'Cancellation'
                 }, { transaction: t });
               }
             }
           }
         }
 
-        order.status = 'cancelled';
+        order.status = status;
         await order.save({ transaction: t });
       });
 
-      return res.json({ success: true, message: 'Order cancelled successfully', data: { order } });
+      return res.json({ success: true, message: `Order ${status} successfully`, data: { order } });
     }
 
     // Enforce basic flow constraints if necessary, or just allow transitions
@@ -948,6 +949,95 @@ router.get('/:id/logs', async (req, res) => {
     return res.json({ success: true, data: { logs } });
   } catch (err) {
     console.error('Error fetching order logs:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// DELETE /orders/:id — permanently delete a rejected order
+router.delete('/:id', async (req, res) => {
+  const { id } = req.params;
+  const userRole = req.headers['x-user-role'];
+
+  if (!userRole || (userRole !== 'Admin' && userRole !== 'Seller')) {
+    return res.status(403).json({ success: false, message: 'Access denied: Administrative privileges required' });
+  }
+
+  try {
+    const access = await checkOrderAccess(id, req.headers);
+    if (!access.hasAccess) {
+      return res.status(access.status).json({ success: false, message: access.message });
+    }
+
+    let deletedOrderInfo = null;
+
+    await sequelize.transaction(async (t) => {
+      const order = await Order.findByPk(id, {
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
+
+      if (!order) {
+        const err = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      if (order.status !== 'rejected') {
+        const err = new Error(`Only rejected orders can be deleted. Current status is "${order.status}".`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      deletedOrderInfo = { id: order.id, shop_id: order.shop_id };
+
+      // 1. Delete order edit logs
+      await OrderEditLog.destroy({
+        where: { order_id: order.id },
+        transaction: t
+      });
+
+      // 2. Delete invoice & invoice payment histories if any exist
+      const invoice = await Invoice.findOne({
+        where: { order_id: order.id },
+        transaction: t
+      });
+      if (invoice) {
+        await InvoicePaymentHistory.destroy({
+          where: { invoice_id: invoice.id },
+          transaction: t
+        });
+        await Invoice.destroy({
+          where: { id: invoice.id },
+          transaction: t
+        });
+      }
+
+      // 3. Detach StockMovements (set order_id to null) to maintain immutable inventory audit logs
+      await StockMovement.update(
+        { order_id: null },
+        { where: { order_id: order.id }, transaction: t }
+      );
+
+      // 4. Delete OrderItems
+      await OrderItem.destroy({
+        where: { order_id: order.id },
+        transaction: t
+      });
+
+      // 5. Delete Order
+      await order.destroy({ transaction: t });
+    });
+
+    return res.json({
+      success: true,
+      message: 'Rejected order deleted successfully',
+      data: deletedOrderInfo
+    });
+  } catch (err) {
+    console.error('Error deleting rejected order:', err);
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ success: false, message: err.message });
+    }
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

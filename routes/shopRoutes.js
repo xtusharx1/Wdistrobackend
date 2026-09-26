@@ -1,6 +1,11 @@
 const express = require('express');
 const Shop = require('../models/Shop');
 const User = require('../models/User');
+const ShopPermit = require('../models/ShopPermit');
+const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
+const DraftOrder = require('../models/DraftOrder');
+const DraftOrderItem = require('../models/DraftOrderItem');
+const Order = require('../models/Order');
 const sequelize = require('../config/db');
 
 const router = express.Router();
@@ -20,8 +25,6 @@ router.post('/', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
-
-const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 
 // Get shops
 router.get('/', async (req, res) => {
@@ -50,7 +53,6 @@ router.get('/', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
-
 
 // Approve shop
 router.patch('/:id/approve', async (req, res) => {
@@ -144,6 +146,68 @@ router.patch('/:id', async (req, res) => {
   } catch (err) {
     console.error('Error updating shop:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// DELETE /shops/:id - Permanently delete a rejected shop account
+router.delete('/:id', async (req, res) => {
+  const { id } = req.params;
+  const userRole = req.headers['x-user-role'];
+
+  if (userRole && userRole !== 'Admin') {
+    return res.status(403).json({ success: false, message: 'Admin access required to delete store' });
+  }
+
+  const t = await sequelize.transaction();
+  try {
+    const shop = await Shop.findByPk(id, { transaction: t });
+    if (!shop) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: 'Store not found' });
+    }
+
+    // Verify the store is actually in Rejected status
+    if (shop.approval_status !== 'Rejected') {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Only rejected store accounts can be deleted. Current status: ${shop.approval_status}`
+      });
+    }
+
+    // Check if store has any existing historical orders
+    const orderCount = await Order.count({ where: { shop_id: id }, transaction: t });
+    if (orderCount > 0) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete store because historical orders are associated with it.'
+      });
+    }
+
+    // 1. Delete DraftOrderItems & DraftOrders if any
+    const draftOrders = await DraftOrder.findAll({ where: { shop_id: id }, attributes: ['id'], transaction: t });
+    const draftOrderIds = draftOrders.map(d => d.id);
+    if (draftOrderIds.length > 0) {
+      await DraftOrderItem.destroy({ where: { draft_order_id: draftOrderIds }, transaction: t });
+      await DraftOrder.destroy({ where: { id: draftOrderIds }, transaction: t });
+    }
+
+    // 2. Delete ShopPermits (force: true to remove paranoid soft-deleted ones as well)
+    await ShopPermit.destroy({ where: { shop_id: id }, force: true, transaction: t });
+
+    // 3. Delete SalesExecutiveAssignments
+    await SalesExecutiveAssignment.destroy({ where: { shop_id: id }, transaction: t });
+
+    // 4. Permanently delete the Shop record
+    await shop.destroy({ transaction: t });
+
+    await t.commit();
+    return res.json({ success: true, message: `Store "${shop.shop_name}" was permanently deleted.` });
+  } catch (err) {
+    await t.rollback();
+    console.error('Error deleting shop:', err);
+    return res.status(500).json({ success: false, message: err.message || 'Internal server error' });
   }
 });
 
