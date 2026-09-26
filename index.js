@@ -98,7 +98,9 @@ if (require.main === module) {
       .catch((err) => {
         console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
       })
+      .then(() => sequelize.query('ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT \'App\'').catch(() => {}))
       // Migrate ShopPermits.permit_type from ENUM to VARCHAR so new permit types
+
       // can be added without a database migration in the future.
       .then(() => sequelize.query(`
         DO $$

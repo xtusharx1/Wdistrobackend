@@ -18,10 +18,12 @@ const Order = sequelize.define('Order', {
     allowNull: false
   },
   total_amount: { type: DataTypes.FLOAT, allowNull: false },
+  source: { type: DataTypes.STRING, defaultValue: 'App', allowNull: true },
   approved_at: { type: DataTypes.DATE, allowNull: true },
   dispatched_at: { type: DataTypes.DATE, allowNull: true },
   delivered_at: { type: DataTypes.DATE, allowNull: true }
 }, {
+
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: false,

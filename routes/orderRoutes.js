@@ -57,15 +57,15 @@ const checkOrderAccess = async (orderId, headers) => {
   return { hasAccess: false, status: 401, message: 'Unauthorized: Access credentials missing' };
 };
 
-// Create order
+// Create order (Customer App or Admin / Manual Order Creation)
 router.post('/', async (req, res) => {
-  const { shop_id, total_amount, items } = req.body;
+  const { shop_id, items, status: requestedStatus, source } = req.body;
   const shopIdHeader = req.headers['x-shop-id'];
   const userRole = req.headers['x-user-role'];
   const userId = req.headers['x-user-id'];
 
-  if (!shop_id || total_amount === undefined || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ success: false, message: 'Invalid order data' });
+  if (!shop_id || !items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ success: false, message: 'Shop and a valid items array are required' });
   }
 
   // Enforce order creation authorization
@@ -91,49 +91,162 @@ router.post('/', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Unauthorized: Access credentials missing' });
   }
 
+  const isAdminOrSeller = userRole === 'Admin' || userRole === 'Seller';
+  const orderSource = source || (isAdminOrSeller ? 'Admin' : (userRole === 'Sales Executive' ? 'Sales Executive' : 'App'));
+  const targetStatus = (isAdminOrSeller && requestedStatus === 'approved') ? 'approved' : 'pending';
+
   try {
     const shop = await Shop.findByPk(shop_id);
     if (!shop) {
       return res.status(404).json({ success: false, message: 'Shop not found' });
     }
 
+    // Validate all items & stock server-side
+    const validatedProducts = [];
+    let calculatedTotal = 0;
+
     for (const item of items) {
+      if (!item.product_id || !item.requested_qty || item.requested_qty <= 0) {
+        return res.status(400).json({ success: false, message: 'Each item must have a valid product_id and positive quantity' });
+      }
+
       const product = await Product.findByPk(item.product_id);
       if (!product) {
         return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
       }
-      if (product.is_explicit_product && !shop.allow_explicit_products) {
-        return res.status(403).json({ success: false, message: 'Explicit products are not allowed for this store.' });
+
+      // License restrictions
+      if (!isAdminOrSeller) {
+        if (product.is_explicit_product && !shop.allow_explicit_products) {
+          return res.status(403).json({ success: false, message: `Explicit product "${product.name}" is not allowed for this store.` });
+        }
+        if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
+          return res.status(403).json({ success: false, message: `Seller Permit Required for product "${product.name}".` });
+        }
+        if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
+          return res.status(403).json({ success: false, message: `Tobacco License Required for product "${product.name}".` });
+        }
       }
-      if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
-        return res.status(403).json({ success: false, message: 'Seller Permit Required for this product category.' });
-      }
-      if (product.required_license === 'Tobacco License' && !(shop.tobacco_license && shop.approved)) {
-        return res.status(403).json({ success: false, message: 'Tobacco License Required for this product category.' });
-      }
+
+      // Stock validation
       if (item.requested_qty > product.stock_quantity) {
-        return res.status(400).json({ success: false, message: 'Requested quantity exceeds available stock.' });
+        return res.status(400).json({
+          success: false,
+          message: `Requested quantity (${item.requested_qty}) for "${product.name}" exceeds available stock (${product.stock_quantity}).`
+        });
+      }
+
+      // Server-side price calculation respecting deal price or custom price
+      const effectiveUnitPrice = (product.deal_price !== null && product.deal_price !== undefined && product.deal_price > 0)
+        ? product.deal_price
+        : (item.custom_price !== undefined && item.custom_price !== null && item.custom_price !== '' && isAdminOrSeller)
+        ? parseFloat(item.custom_price)
+        : product.price;
+
+      calculatedTotal += effectiveUnitPrice * item.requested_qty;
+
+      validatedProducts.push({
+        product,
+        requested_qty: parseInt(item.requested_qty, 10),
+        effectiveUnitPrice,
+        custom_price: (item.custom_price !== undefined && item.custom_price !== null && item.custom_price !== '' && isAdminOrSeller) ? parseFloat(item.custom_price) : null
+      });
+    }
+
+    let createdOrder;
+    let createdItems;
+
+    await sequelize.transaction(async (t) => {
+      createdOrder = await Order.create({
+        shop_id,
+        total_amount: calculatedTotal,
+        status: targetStatus,
+        source: orderSource,
+        approved_at: targetStatus === 'approved' ? new Date() : null
+      }, { transaction: t });
+
+      const orderItemsData = validatedProducts.map(({ product, requested_qty, effectiveUnitPrice, custom_price }) => ({
+        order_id: createdOrder.id,
+        product_id: product.id,
+        requested_qty,
+        approved_qty: targetStatus === 'approved' ? requested_qty : null,
+        price: effectiveUnitPrice,
+        custom_price
+      }));
+
+      createdItems = await OrderItem.bulkCreate(orderItemsData, { transaction: t });
+
+      // If created directly in approved status, perform stock deduction and log stock movement
+      if (targetStatus === 'approved') {
+        for (const { product, requested_qty } of validatedProducts) {
+          const lockedProduct = await Product.findByPk(product.id, { transaction: t, lock: t.LOCK.UPDATE });
+          const prevStock = lockedProduct.stock_quantity;
+          lockedProduct.stock_quantity -= requested_qty;
+          if (lockedProduct.stock_quantity === 0) {
+            lockedProduct.is_active = false;
+          }
+          await lockedProduct.save({ transaction: t });
+
+          await StockMovement.create({
+            product_id: lockedProduct.id,
+            quantity_changed: -requested_qty,
+            previous_stock: prevStock,
+            new_stock: lockedProduct.stock_quantity,
+            order_id: createdOrder.id,
+            action: 'Manual Order Creation'
+          }, { transaction: t });
+        }
+      }
+    });
+
+    // If approved, automatically generate the invoice and PDF
+    if (targetStatus === 'approved') {
+      try {
+        const orderForInvoice = await Order.findByPk(createdOrder.id, {
+          include: [{ model: OrderItem, include: [Product] }]
+        });
+        let pdfUrl = null;
+        if (shop) {
+          try {
+            pdfUrl = await uploadInvoicePDF(orderForInvoice, shop);
+          } catch (pdfErr) {
+            console.error('Invoice PDF upload error for manual order:', pdfErr);
+          }
+        }
+        await Invoice.create({
+          order_id: createdOrder.id,
+          final_amount: createdOrder.total_amount,
+          generated_at: new Date(),
+          pdf_url: pdfUrl
+        });
+      } catch (invErr) {
+        console.error('Invoice creation error for manual order:', invErr);
       }
     }
 
-    const order = await Order.create({ shop_id, total_amount, status: 'pending' });
+    const fullOrder = await Order.findByPk(createdOrder.id, {
+      include: [
+        {
+          model: OrderItem,
+          include: [{ model: Product, attributes: ['id', 'name', 'price', 'sku_id', 'image_url', 'stock_quantity'] }]
+        },
+        {
+          model: Invoice
+        }
+      ]
+    });
 
-    const orderItems = items.map((item) => ({
-      order_id: order.id,
-      product_id: item.product_id,
-      requested_qty: item.requested_qty,
-      approved_qty: null,
-      price: item.price,
-    }));
-
-    await OrderItem.bulkCreate(orderItems);
-
-    return res.status(201).json({ success: true, message: 'Order created successfully', data: { order, items: orderItems } });
+    return res.status(201).json({
+      success: true,
+      message: targetStatus === 'approved' ? 'Order created and approved successfully' : 'Order created successfully',
+      data: { order: fullOrder }
+    });
   } catch (err) {
     console.error('Error creating order:', err);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    return res.status(500).json({ success: false, message: err.message || 'Internal server error' });
   }
 });
+
 
 // Get orders
 router.get('/', async (req, res) => {
