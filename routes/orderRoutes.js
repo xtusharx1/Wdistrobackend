@@ -1098,8 +1098,8 @@ router.delete('/:id', async (req, res) => {
         throw err;
       }
 
-      if (order.status !== 'rejected') {
-        const err = new Error(`Only rejected orders can be deleted. Current status is "${order.status}".`);
+      if (order.status !== 'rejected' && order.status !== 'cancelled') {
+        const err = new Error(`Only cancelled or rejected orders can be deleted. Current status is "${order.status}".`);
         err.statusCode = 400;
         throw err;
       }
@@ -1146,7 +1146,7 @@ router.delete('/:id', async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Rejected order deleted successfully',
+      message: 'Order deleted successfully',
       data: deletedOrderInfo
     });
   } catch (err) {
