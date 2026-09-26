@@ -986,7 +986,7 @@ router.post('/import', memoryUpload.single('file'), async (req, res) => {
 // Get products
 router.get('/', async (req, res) => {
   try {
-    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active, collection_id } = req.query;
+    const { page, limit, search, main_category, mainCategory, sub_category, subCategory, sortBy, sortOrder, stockFilter, is_active, collection_id, clearance } = req.query;
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
@@ -1014,6 +1014,12 @@ router.get('/', async (req, res) => {
       whereClause.is_active = true;
     } else if (is_active === 'false' || is_active === false) {
       whereClause.is_active = false;
+    }
+
+    if (clearance === 'true' || clearance === true) {
+      whereClause.is_clearance = true;
+    } else if (clearance === 'false' || clearance === false) {
+      whereClause.is_clearance = false;
     }
 
     // Collection filter: ?collection_id=none -> without collection, ?collection_id=ID -> specific collection
