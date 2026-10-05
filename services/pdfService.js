@@ -171,7 +171,13 @@ const generateInvoicePDFBuffer = (order, shop) => {
     
     doc.fontSize(9).font('Helvetica');
 
-    (order.OrderItems || []).forEach((item, index) => {
+    const sortedItems = [...(order.OrderItems || [])].sort((a, b) => {
+      const nameA = a.Product?.billing_name || a.Product?.name || `Product #${a.product_id}`;
+      const nameB = b.Product?.billing_name || b.Product?.name || `Product #${b.product_id}`;
+      return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+    });
+
+    sortedItems.forEach((item, index) => {
       const name = item.Product?.billing_name || item.Product?.name || `Product #${item.product_id}`;
       const skuId = item.Product?.sku_id || '—';
       const reqQty = item.requested_qty;

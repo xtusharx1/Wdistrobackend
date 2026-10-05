@@ -990,8 +990,21 @@ router.get('/', async (req, res) => {
     const shopId = req.headers['x-shop-id'];
 
     const whereClause = {};
-    if (search) {
-      whereClause.name = { [Op.iLike]: `%${search}%` };
+    if (search && search.trim()) {
+      const tokens = search.trim().split(/\s+/).filter(Boolean);
+      const tokenConditions = tokens.map((token) => ({
+        [Op.or]: [
+          { name: { [Op.iLike]: `%${token}%` } },
+          { sku_id: { [Op.iLike]: `%${token}%` } },
+          { billing_name: { [Op.iLike]: `%${token}%` } }
+        ]
+      }));
+
+      if (tokenConditions.length === 1) {
+        whereClause[Op.or] = tokenConditions[0][Op.or];
+      } else if (tokenConditions.length > 1) {
+        whereClause[Op.and] = tokenConditions;
+      }
     }
 
     const mainCat = main_category || mainCategory;

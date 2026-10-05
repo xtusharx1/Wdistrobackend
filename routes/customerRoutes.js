@@ -70,7 +70,7 @@ router.get('/:customerId/payments', async (req, res) => {
 
       return {
         invoice_id: inv.id,
-        invoice_number: `INV-${inv.id}`,
+        invoice_number: `INV-${inv.Order.id}`,
         order_number: `WS-${inv.Order.id}`,
         invoice_date: inv.generated_at,
         total_invoice_amount: inv.final_amount,

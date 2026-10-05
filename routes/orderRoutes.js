@@ -168,6 +168,9 @@ router.post('/', async (req, res) => {
         approved_at: targetStatus === 'approved' ? new Date() : null
       }, { transaction: t });
 
+      // Sort items in alphabetical order by product name
+      validatedProducts.sort((a, b) => (a.product.name || '').localeCompare(b.product.name || '', undefined, { sensitivity: 'base' }));
+
       const orderItemsData = validatedProducts.map(({ product, requested_qty, effectiveUnitPrice, custom_price }) => ({
         order_id: createdOrder.id,
         product_id: product.id,
@@ -982,8 +985,14 @@ router.put('/:id/edit', async (req, res) => {
       await OrderItem.destroy({ where: { order_id: order.id }, transaction: t });
 
       let newTotal = 0;
+      const sortedItems = [...items].sort((a, b) => {
+        const nameA = productCache.get(a.product_id)?.name || '';
+        const nameB = productCache.get(b.product_id)?.name || '';
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      });
+
       const newOrderItems = [];
-      for (const newItem of items) {
+      for (const newItem of sortedItems) {
         const product = productCache.get(newItem.product_id);
         const customPrice = (newItem.custom_price != null && newItem.custom_price !== '') ? parseFloat(newItem.custom_price) : null;
         const effectivePrice = customPrice ?? product.price;
