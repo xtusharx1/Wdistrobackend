@@ -3,7 +3,8 @@ const Invoice = require('../models/Invoice');
 const InvoicePaymentHistory = require('../models/InvoicePaymentHistory');
 const Order = require('../models/Order');
 const User = require('../models/User');
-const { Op } = require('sequelize');
+const { QueryTypes } = require('sequelize');
+const sequelize = require('../config/db');
 const CreditNote = require('../models/CreditNote');
 const CreditNoteApplication = require('../models/CreditNoteApplication');
 const OrderReturn = require('../models/OrderReturn');
@@ -25,80 +26,165 @@ const canViewStoreAccount = async (shopId, headers) => {
   return false;
 };
 
-// Cancelled/rejected orders aren't owed
-const BILLABLE_ORDER = (shopId) => ({ shop_id: shopId, status: { [Op.notIn]: ['cancelled', 'rejected'] } });
+// Per-order (invoice) balances for one store, aggregated in SQL so large accounts stay fast.
+// Outstanding is computed from actual payment rows and credit applications, never stored totals.
+const ORDER_BALANCES_SQL = `
+  WITH inv AS (
+    SELECT i.id AS invoice_id, i.order_id, o.created_at AS order_date, i.pdf_url,
+           i.final_amount::numeric AS total,
+           COALESCE(p.paid, 0)::numeric AS paid,
+           COALESCE(p.n, 0)::int AS payment_count,
+           p.last_paid_at AS last_payment_at,
+           COALESCE(a.credited, 0)::numeric AS credited
+    FROM "Invoices" i
+    JOIN "Orders" o ON o.id = i.order_id
+    LEFT JOIN (
+      SELECT invoice_id, SUM(payment_amount) AS paid, COUNT(*) AS n, MAX(verified_at) AS last_paid_at
+      FROM "InvoicePaymentHistories" GROUP BY invoice_id
+    ) p ON p.invoice_id = i.id
+    LEFT JOIN (
+      SELECT invoice_id, SUM(amount) AS credited FROM "CreditNoteApplications" GROUP BY invoice_id
+    ) a ON a.invoice_id = i.id
+    WHERE o.shop_id = :shopId AND o.status NOT IN ('cancelled', 'rejected')
+  ), calc AS (
+    SELECT *, GREATEST(0, ROUND(total - paid - credited, 2)) AS outstanding FROM inv
+  ), tagged AS (
+    SELECT *, CASE
+      WHEN outstanding <= 0.005 THEN 'paid'
+      WHEN paid + credited > 0.005 THEN 'partially_paid'
+      ELSE 'unpaid' END AS status
+    FROM calc
+  )`;
 
-// ── GET /customers/:customerId/payment-history — payments, credit adjustments and balance summary ──
+const STATUS_FILTERS = { all: 'TRUE', unpaid: "status <> 'paid'", paid: "status = 'paid'" };
+
+// ── GET /customers/:customerId/payment-history — account summary + paged order-wise balances ──
+// query: status=unpaid|paid|all (default unpaid), search=<order/invoice number>, page (1+), limit (1-50, default 20)
 router.get('/:customerId/payment-history', async (req, res) => {
   const { customerId } = req.params;
   if (!/^\d+$/.test(String(customerId))) return res.status(400).json({ success: false, message: 'Invalid store ID' });
+  const status = STATUS_FILTERS[req.query.status] ? req.query.status : 'unpaid';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const digits = String(req.query.search || '').replace(/\D/g, '').slice(0, 12);
   try {
     if (!(await canViewStoreAccount(customerId, req.headers))) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    const invoices = await Invoice.findAll({
-      include: [
-        { model: Order, where: BILLABLE_ORDER(Number(customerId)), attributes: ['id', 'status', 'created_at'] },
-        { model: InvoicePaymentHistory, as: 'PaymentHistory' },
-        { model: CreditNoteApplication, as: 'CreditApplications', include: [{ model: CreditNote, attributes: ['id', 'credit_note_number'] }] },
-      ],
-      order: [['id', 'DESC']],
-    });
-    const notes = await CreditNote.findAll({ include: [{ model: Order, attributes: [], where: { shop_id: Number(customerId) } }] });
+    const shopId = Number(customerId);
+    const [[totals], rows, notes] = await Promise.all([
+      sequelize.query(`${ORDER_BALANCES_SQL}
+        SELECT COALESCE(SUM(total), 0) AS total_invoiced, COALESCE(SUM(paid), 0) AS total_payments,
+               COALESCE(SUM(credited), 0) AS total_credits, COALESCE(SUM(outstanding), 0) AS outstanding,
+               COUNT(*)::int AS count_all,
+               COUNT(*) FILTER (WHERE status <> 'paid')::int AS count_unpaid,
+               COUNT(*) FILTER (WHERE status = 'paid')::int AS count_paid
+        FROM tagged`, { replacements: { shopId }, type: QueryTypes.SELECT }),
+      sequelize.query(`${ORDER_BALANCES_SQL}
+        SELECT *, COUNT(*) OVER()::int AS filtered_total FROM tagged
+        WHERE ${STATUS_FILTERS[status]} AND (:digits = '' OR order_id::text LIKE :like)
+        ORDER BY order_date DESC, invoice_id DESC
+        LIMIT :limit OFFSET :offset`,
+      { replacements: { shopId, digits, like: `%${digits}%`, limit, offset: (page - 1) * limit }, type: QueryTypes.SELECT }),
+      CreditNote.findAll({ include: [{ model: Order, attributes: [], where: { shop_id: shopId } }] }),
+    ]);
 
-    let totalInvoiced = 0, totalPaid = 0, totalCredits = 0, outstanding = 0;
-    const payments = [];
-    const creditAdjustments = [];
-    const invoiceRows = invoices.map((inv) => {
-      const number = `INV-${inv.Order.id}`;
-      const paid = round2((inv.PaymentHistory || []).reduce((s, p) => s + p.payment_amount, 0));
-      const credited = round2((inv.CreditApplications || []).reduce((s, a) => s + a.amount, 0));
-      const owed = Math.max(0, round2(inv.final_amount - paid - credited));
-      totalInvoiced += inv.final_amount; totalPaid += paid; totalCredits += credited; outstanding += owed;
-      for (const p of inv.PaymentHistory || []) {
-        payments.push({
-          id: p.id,
-          payment_date: p.verified_at,
-          reference_no: p.payment_reference_no,
-          invoice_number: number,
-          order_number: `WS-${inv.Order.id}`,
-          payment_method: p.payment_method,
-          amount: p.payment_amount,
-          remarks: p.remarks,
-        });
-      }
-      for (const a of inv.CreditApplications || []) {
-        creditAdjustments.push({
-          id: a.id,
-          date: a.created_at,
-          credit_note_number: a.CreditNote?.credit_note_number,
-          invoice_number: number,
-          amount: a.amount,
-          source: a.source,
-        });
-      }
-      return { invoice_number: number, order_number: `WS-${inv.Order.id}`, invoice_date: inv.generated_at, total: inv.final_amount, paid, credited, outstanding: owed };
-    });
-    payments.sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date));
-    creditAdjustments.sort((a, b) => new Date(b.date) - new Date(a.date));
-
+    const filteredTotal = rows[0]?.filtered_total || 0;
     return res.json({
       success: true,
       data: {
         summary: {
-          total_invoiced: round2(totalInvoiced),
-          total_payments: round2(totalPaid),
-          total_credits_applied: round2(totalCredits),
-          outstanding_balance: round2(outstanding),
+          total_invoiced: round2(totals.total_invoiced),
+          total_payments: round2(totals.total_payments),
+          total_credits_applied: round2(totals.total_credits),
+          outstanding_balance: round2(totals.outstanding),
           available_credit: round2(notes.reduce((s, cn) => s + remainingOf(cn), 0)),
         },
-        payments,
-        credit_adjustments: creditAdjustments,
-        invoices: invoiceRows,
+        counts: { all: totals.count_all, unpaid: totals.count_unpaid, paid: totals.count_paid },
+        orders: rows.map((r) => ({
+          invoice_id: r.invoice_id,
+          order_id: r.order_id,
+          order_number: `WS-${r.order_id}`,
+          invoice_number: `INV-${r.order_id}`,
+          order_date: r.order_date,
+          total: round2(r.total),
+          paid: round2(r.paid),
+          credited: round2(r.credited),
+          outstanding: round2(r.outstanding),
+          status: r.status,
+          payment_count: r.payment_count,
+          last_payment_at: r.last_payment_at,
+        })),
+        pagination: { page, limit, total: filteredTotal, has_more: page * limit < filteredTotal },
+        filter: { status, search: digits },
       }
     });
   } catch (err) {
     console.error('Error fetching payment history:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /customers/:customerId/orders/:orderId/payment-history — one order's billing timeline ──
+router.get('/:customerId/orders/:orderId/payment-history', async (req, res) => {
+  const { customerId, orderId } = req.params;
+  if (!/^\d+$/.test(String(customerId)) || !/^\d+$/.test(String(orderId))) {
+    return res.status(400).json({ success: false, message: 'Invalid store or order ID' });
+  }
+  try {
+    if (!(await canViewStoreAccount(customerId, req.headers))) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const order = await Order.findOne({ where: { id: Number(orderId), shop_id: Number(customerId) } });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const invoice = await Invoice.findOne({
+      where: { order_id: order.id },
+      include: [
+        { model: InvoicePaymentHistory, as: 'PaymentHistory' },
+        { model: CreditNoteApplication, as: 'CreditApplications', include: [{ model: CreditNote, attributes: ['id', 'credit_note_number'] }] },
+      ],
+    });
+    if (!invoice) return res.status(404).json({ success: false, message: 'This order has not been invoiced yet' });
+
+    const entries = [
+      ...(invoice.PaymentHistory || []).map((p) => ({
+        type: 'payment', date: p.verified_at, amount: p.payment_amount,
+        payment_method: p.payment_method, reference_no: p.payment_reference_no, remarks: p.remarks, payment_id: p.id,
+      })),
+      ...(invoice.CreditApplications || []).map((a) => ({
+        type: 'credit', date: a.created_at, amount: a.amount, credit_note_number: a.CreditNote?.credit_note_number,
+      })),
+    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    let balance = round2(invoice.final_amount);
+    const timeline = [{ type: 'invoice', date: order.approved_at || order.created_at, amount: round2(invoice.final_amount), balance_after: balance }];
+    for (const e of entries) {
+      balance = round2(balance - e.amount);
+      timeline.push({ ...e, amount: round2(e.amount), balance_after: Math.max(0, balance) });
+    }
+    const paid = round2((invoice.PaymentHistory || []).reduce((s, p) => s + p.payment_amount, 0));
+    const credited = round2((invoice.CreditApplications || []).reduce((s, a) => s + a.amount, 0));
+    const outstanding = Math.max(0, round2(invoice.final_amount - paid - credited));
+
+    return res.json({
+      success: true,
+      data: {
+        order_id: order.id,
+        order_number: `WS-${order.id}`,
+        invoice_number: `INV-${order.id}`,
+        order_date: order.created_at,
+        order_status: order.status,
+        total: round2(invoice.final_amount),
+        paid,
+        credited,
+        outstanding,
+        status: outstanding <= 0.005 ? 'paid' : paid + credited > 0.005 ? 'partially_paid' : 'unpaid',
+        invoice_pdf_url: invoice.pdf_url,
+        timeline,
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching order payment history:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
