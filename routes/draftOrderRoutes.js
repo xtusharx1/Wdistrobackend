@@ -6,6 +6,7 @@ const Product = require('../models/Product');
 const Order = require('../models/Order');
 const OrderItem = require('../models/OrderItem');
 const Shop = require('../models/Shop');
+const { getProductEffectivePricing } = require('../services/pricingService');
 
 const router = express.Router();
 
@@ -52,9 +53,14 @@ router.post('/', async (req, res) => {
       }
     }
 
+    const pricingMap = {};
+    for (const item of items) {
+      pricingMap[item.product_id] = await getProductEffectivePricing(productMap[item.product_id]);
+    }
+
     const total = items.reduce((sum, item) => {
-      const p = productMap[item.product_id];
-      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const pricing = pricingMap[item.product_id];
+      const price = item.custom_price || pricing.effective_price;
       return sum + price * item.quantity;
     }, 0);
 
@@ -65,9 +71,7 @@ router.post('/', async (req, res) => {
           draft_order_id: d.id,
           product_id: item.product_id,
           quantity: item.quantity,
-          price_at_save: productMap[item.product_id].deal_price || (productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
-            ? productMap[item.product_id].clearance_price
-            : productMap[item.product_id].price),
+          price_at_save: pricingMap[item.product_id].effective_price,
           custom_price: item.custom_price || null,
         })),
         { transaction: t }
@@ -157,9 +161,14 @@ router.put('/:id', async (req, res) => {
       }
     }
 
+    const pricingMap = {};
+    for (const item of items) {
+      pricingMap[item.product_id] = await getProductEffectivePricing(productMap[item.product_id]);
+    }
+
     const total = items.reduce((sum, item) => {
-      const p = productMap[item.product_id];
-      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const pricing = pricingMap[item.product_id];
+      const price = item.custom_price || pricing.effective_price;
       return sum + price * item.quantity;
     }, 0);
 
@@ -170,9 +179,7 @@ router.put('/:id', async (req, res) => {
           draft_order_id: draft.id,
           product_id: item.product_id,
           quantity: item.quantity,
-          price_at_save: productMap[item.product_id].deal_price || (productMap[item.product_id].is_clearance && productMap[item.product_id].clearance_price
-            ? productMap[item.product_id].clearance_price
-            : productMap[item.product_id].price),
+          price_at_save: pricingMap[item.product_id].effective_price,
           custom_price: item.custom_price || null,
         })),
         { transaction: t }
@@ -263,10 +270,15 @@ router.post('/:id/submit', async (req, res) => {
       });
     }
 
-    // Use current product prices for the order
+    // Use current product prices respecting deal eligibility for the order
+    const pricingMap = {};
+    for (const item of draft.DraftOrderItems) {
+      pricingMap[item.product_id] = await getProductEffectivePricing(item.Product);
+    }
+
     const total = draft.DraftOrderItems.reduce((sum, item) => {
-      const p = item.Product;
-      const price = item.custom_price || p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+      const pricing = pricingMap[item.product_id];
+      const price = item.custom_price || pricing.effective_price;
       return sum + price * item.quantity;
     }, 0);
 
@@ -278,14 +290,13 @@ router.post('/:id/submit', async (req, res) => {
 
       await OrderItem.bulkCreate(
         draft.DraftOrderItems.map(item => {
-          const p = item.Product;
-          const price = p.deal_price || (p.is_clearance && p.clearance_price ? p.clearance_price : p.price);
+          const pricing = pricingMap[item.product_id];
           return {
             order_id: newOrder.id,
             product_id: item.product_id,
             requested_qty: item.quantity,
             approved_qty: null,
-            price,
+            price: pricing.effective_price,
             custom_price: item.custom_price || null,
           };
         }),

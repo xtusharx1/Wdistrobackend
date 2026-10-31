@@ -12,20 +12,20 @@ const s3 = new S3Client({
 
 const formatCA_Date = (date) => {
   if (!date) return '—';
-  return new Intl.DateTimeFormat('en-GB', {
+  return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Los_Angeles',
-    day: '2-digit',
     month: '2-digit',
+    day: '2-digit',
     year: 'numeric'
   }).format(new Date(date));
 };
 
 const formatCA_DateTime = (date) => {
   if (!date) return '—';
-  return new Intl.DateTimeFormat('en-GB', {
+  return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Los_Angeles',
-    day: '2-digit',
     month: '2-digit',
+    day: '2-digit',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',

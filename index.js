@@ -38,6 +38,7 @@ const inventoryReceivingRoutes = require('./routes/inventoryReceivingRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const collectionRoutes = require('./routes/collectionRoutes');
 const customerRoutes = require('./routes/customerRoutes');
+const returnRoutes = require('./routes/returnRoutes');
 
 const app = express();
 
@@ -80,6 +81,7 @@ app.use('/inventory-receiving', inventoryReceivingRoutes);
 app.use('/categories', categoryRoutes);
 app.use('/collections', collectionRoutes);
 app.use('/customers', customerRoutes);
+app.use('/returns', returnRoutes);
 console.timeEnd('🛣️ Route Registration');
 
 const PORT = process.env.PORT || 3000;
@@ -99,6 +101,8 @@ if (require.main === module) {
         console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
       })
       .then(() => sequelize.query('ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT \'App\'').catch(() => {}))
+      .then(() => sequelize.query('ALTER TABLE "Invoices" ADD COLUMN IF NOT EXISTS total_credited_amount DOUBLE PRECISION NOT NULL DEFAULT 0').catch(() => {}))
+      .then(() => sequelize.query('ALTER TABLE "CreditNotes" ADD COLUMN IF NOT EXISTS used_amount DOUBLE PRECISION').catch(() => {}))
       // Migrate ShopPermits.permit_type from ENUM to VARCHAR so new permit types
 
       // can be added without a database migration in the future.
@@ -193,6 +197,15 @@ if (require.main === module) {
           }
         } catch (err) {
           console.error('Error seeding/migrating product collections:', err);
+        }
+
+        // One-time: credit notes issued before usage tracking get their applications recorded
+        try {
+          const { backfillLegacyCreditNotes } = require('./services/creditNoteService');
+          const migrated = await backfillLegacyCreditNotes();
+          if (migrated > 0) console.log(`Credit note usage backfilled for ${migrated} note(s) ✅`);
+        } catch (err) {
+          console.error('Error backfilling credit note usage:', err);
         }
 
         dbSynced = true;

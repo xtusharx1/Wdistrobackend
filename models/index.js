@@ -9,6 +9,11 @@ const SalesExecutiveAssignment = require('./SalesExecutiveAssignment');
 const StockMovement = require('./StockMovement');
 const ShopPermit = require('./ShopPermit');
 const OrderEditLog = require('./OrderEditLog');
+const PaymentEditLog = require('./PaymentEditLog');
+const OrderReturn = require('./OrderReturn');
+const OrderReturnItem = require('./OrderReturnItem');
+const CreditNote = require('./CreditNote');
+const CreditNoteApplication = require('./CreditNoteApplication');
 const DraftOrder = require('./DraftOrder');
 const DraftOrderItem = require('./DraftOrderItem');
 const ProductVariationGroup = require('./ProductVariationGroup');
@@ -66,6 +71,34 @@ Order.hasMany(OrderEditLog, { foreignKey: 'order_id' });
 OrderEditLog.belongsTo(User, { foreignKey: 'user_id' });
 User.hasMany(OrderEditLog, { foreignKey: 'user_id' });
 
+// 10a. PaymentEditLog associations
+// No FK constraint so audit rows survive permanent order deletion
+PaymentEditLog.belongsTo(InvoicePaymentHistory, { foreignKey: 'payment_id', constraints: false });
+InvoicePaymentHistory.hasMany(PaymentEditLog, { foreignKey: 'payment_id', as: 'EditLogs', constraints: false });
+PaymentEditLog.belongsTo(User, { foreignKey: 'user_id' });
+
+// 10b. Returns and credit notes
+OrderReturn.belongsTo(Order, { foreignKey: 'order_id' });
+Order.hasMany(OrderReturn, { foreignKey: 'order_id', as: 'Returns' });
+OrderReturn.belongsTo(Invoice, { foreignKey: 'invoice_id' });
+OrderReturn.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'CreatedBy' });
+OrderReturn.hasMany(OrderReturnItem, { foreignKey: 'return_id', as: 'items' });
+OrderReturnItem.belongsTo(OrderReturn, { foreignKey: 'return_id' });
+OrderReturnItem.belongsTo(Product, { foreignKey: 'product_id' });
+// No FK to OrderItems: the return keeps its own price/name snapshot
+OrderReturnItem.belongsTo(OrderItem, { foreignKey: 'order_item_id', constraints: false });
+OrderReturn.hasOne(CreditNote, { foreignKey: 'return_id' });
+CreditNote.belongsTo(OrderReturn, { foreignKey: 'return_id' });
+CreditNote.belongsTo(Order, { foreignKey: 'order_id' });
+CreditNote.belongsTo(Invoice, { foreignKey: 'invoice_id' });
+Invoice.hasMany(CreditNote, { foreignKey: 'invoice_id', as: 'CreditNotes' });
+CreditNote.hasMany(CreditNoteApplication, { foreignKey: 'credit_note_id', as: 'Applications' });
+CreditNoteApplication.belongsTo(CreditNote, { foreignKey: 'credit_note_id' });
+CreditNoteApplication.belongsTo(Invoice, { foreignKey: 'invoice_id' });
+Invoice.hasMany(CreditNoteApplication, { foreignKey: 'invoice_id', as: 'CreditApplications' });
+CreditNoteApplication.belongsTo(Shop, { foreignKey: 'shop_id' });
+CreditNoteApplication.belongsTo(User, { foreignKey: 'applied_by_user_id', as: 'AppliedBy' });
+
 // 11. DraftOrder associations
 DraftOrder.belongsTo(Shop, { foreignKey: 'shop_id' });
 Shop.hasMany(DraftOrder, { foreignKey: 'shop_id' });
@@ -94,6 +127,11 @@ module.exports = {
   StockMovement,
   ShopPermit,
   OrderEditLog,
+  PaymentEditLog,
+  OrderReturn,
+  OrderReturnItem,
+  CreditNote,
+  CreditNoteApplication,
   DraftOrder,
   DraftOrderItem,
   ProductVariationGroup,

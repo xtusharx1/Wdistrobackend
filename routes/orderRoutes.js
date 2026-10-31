@@ -11,6 +11,8 @@ const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const OrderEditLog = require('../models/OrderEditLog');
 const InvoicePaymentHistory = require('../models/InvoicePaymentHistory');
 const User = require('../models/User');
+const { getProductEffectivePricing } = require('../services/pricingService');
+const { computeInvoiceBalance } = require('../services/invoiceBalanceService');
 
 const router = express.Router();
 
@@ -139,12 +141,11 @@ router.post('/', async (req, res) => {
         });
       }
 
-      // Server-side price calculation respecting deal price or custom price
-      const effectiveUnitPrice = (product.deal_price !== null && product.deal_price !== undefined && product.deal_price > 0)
-        ? product.deal_price
-        : (item.custom_price !== undefined && item.custom_price !== null && item.custom_price !== '' && isAdminOrSeller)
-        ? parseFloat(item.custom_price)
-        : product.price;
+      // Server-side price calculation respecting deal price eligibility or custom price
+      const pricing = await getProductEffectivePricing(product);
+      const hasCustomPrice = item.custom_price !== undefined && item.custom_price !== null && item.custom_price !== '' && isAdminOrSeller;
+      const customPriceNum = hasCustomPrice ? parseFloat(item.custom_price) : null;
+      const effectiveUnitPrice = hasCustomPrice ? customPriceNum : pricing.effective_price;
 
       calculatedTotal += effectiveUnitPrice * item.requested_qty;
 
@@ -152,7 +153,8 @@ router.post('/', async (req, res) => {
         product,
         requested_qty: parseInt(item.requested_qty, 10),
         effectiveUnitPrice,
-        custom_price: (item.custom_price !== undefined && item.custom_price !== null && item.custom_price !== '' && isAdminOrSeller) ? parseFloat(item.custom_price) : null
+        itemPrice: pricing.effective_price,
+        custom_price: customPriceNum
       });
     }
 
@@ -171,12 +173,12 @@ router.post('/', async (req, res) => {
       // Sort items in alphabetical order by product name
       validatedProducts.sort((a, b) => (a.product.name || '').localeCompare(b.product.name || '', undefined, { sensitivity: 'base' }));
 
-      const orderItemsData = validatedProducts.map(({ product, requested_qty, effectiveUnitPrice, custom_price }) => ({
+      const orderItemsData = validatedProducts.map(({ product, requested_qty, itemPrice, custom_price }) => ({
         order_id: createdOrder.id,
         product_id: product.id,
         requested_qty,
         approved_qty: targetStatus === 'approved' ? requested_qty : null,
-        price: effectiveUnitPrice,
+        price: itemPrice,
         custom_price
       }));
 
@@ -234,7 +236,7 @@ router.post('/', async (req, res) => {
       include: [
         {
           model: OrderItem,
-          include: [{ model: Product, attributes: ['id', 'name', 'price', 'sku_id', 'image_url', 'stock_quantity'] }]
+          include: [{ model: Product, attributes: ['id', 'name', 'price', 'deal_price', 'product_collection_id', 'sku_id', 'image_url', 'stock_quantity'] }]
         },
         {
           model: Invoice
@@ -297,13 +299,13 @@ router.get('/', async (req, res) => {
           include: [
             {
               model: Product,
-              attributes: ['id', 'name', 'price', 'sku_id', 'image_url', 'stock_quantity', 'is_active']
+              attributes: ['id', 'name', 'price', 'deal_price', 'product_collection_id', 'sku_id', 'image_url', 'stock_quantity', 'is_active']
             }
           ]
         },
         {
           model: Invoice,
-          attributes: ['id', 'order_id', 'final_amount', 'generated_at', 'pdf_url', 'payment_status', 'total_paid_amount', 'remaining_balance']
+          attributes: ['id', 'order_id', 'final_amount', 'generated_at', 'pdf_url', 'payment_status', 'total_paid_amount', 'total_credited_amount', 'remaining_balance']
         }
       ],
       order: [['created_at', 'DESC']]
@@ -331,7 +333,7 @@ router.get('/:id', async (req, res) => {
         attributes: ['id', 'order_id', 'product_id', 'requested_qty', 'approved_qty', 'price', 'custom_price'],
         include: [{
           model: Product,
-          attributes: ['id', 'name', 'price', 'sku_id', 'image_url', 'stock_quantity', 'is_active']
+          attributes: ['id', 'name', 'price', 'deal_price', 'product_collection_id', 'sku_id', 'image_url', 'stock_quantity', 'is_active']
         }]
       }]
     });
@@ -755,7 +757,7 @@ router.put('/:id/approve', async (req, res) => {
   }
 });
 
-// Edit order before dispatch (draft committed atomically)
+// Edit order before delivery (draft committed atomically)
 router.put('/:id/edit', async (req, res) => {
   const { id } = req.params;
   const { items } = req.body;
@@ -795,20 +797,36 @@ router.put('/:id/edit', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Shop associated with this order not found' });
     }
 
-    const LOCKED_STATUSES = ['dispatched', 'delivered', 'completed', 'cancelled'];
+    const LOCKED_STATUSES = ['delivered', 'completed', 'cancelled', 'rejected'];
+    const lockedStatusMessage = (status) =>
+      `Order cannot be edited in "${status}" status. Editing is only allowed before delivery.`;
     if (LOCKED_STATUSES.includes(order.status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Order cannot be edited in "${order.status}" status. Editing is only allowed before dispatch.`
-      });
+      return res.status(400).json({ success: false, message: lockedStatusMessage(order.status) });
     }
 
-    const wasPending = order.status === 'pending';
+    let wasPending = order.status === 'pending';
     const isApproved = true;
     const parsedUserId = userId ? parseInt(userId) : null;
     const auditLogs = [];
+    let invoiceId = null;
 
     await sequelize.transaction(async (t) => {
+      // Lock the order row and re-check its status so a concurrent "Mark Delivered" can't slip past
+      const lockedOrder = await Order.findByPk(order.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (LOCKED_STATUSES.includes(lockedOrder.status)) {
+        const err = new Error(lockedStatusMessage(lockedOrder.status));
+        err.statusCode = 400;
+        throw err;
+      }
+      wasPending = lockedOrder.status === 'pending';
+
+      const invoice = await Invoice.findOne({ where: { order_id: order.id }, transaction: t, lock: t.LOCK.UPDATE });
+      if (invoice && invoice.payment_status === 'settled') {
+        const err = new Error('This order\'s invoice has been settled and can no longer be edited.');
+        err.statusCode = 409;
+        throw err;
+      }
+
       // Re-fetch order items inside transaction with row locks
       const oldItems = await OrderItem.findAll({
         where: { order_id: order.id },
@@ -903,6 +921,7 @@ router.put('/:id/edit', async (req, res) => {
             order_id: order.id,
             action: 'Edit - Item Added'
           }, { transaction: t });
+          const pricing = await getProductEffectivePricing(product);
           auditLogs.push({
             order_id: order.id,
             user_id: parsedUserId,
@@ -910,7 +929,7 @@ router.put('/:id/edit', async (req, res) => {
             product_id: newItem.product_id,
             product_name: product.name,
             previous_value: null,
-            new_value: { quantity: newItem.quantity, price: newCustomPrice ?? product.price }
+            new_value: { quantity: newItem.quantity, price: newCustomPrice ?? pricing.effective_price }
           });
         } else {
           // Existing product: compute quantity delta
@@ -964,9 +983,9 @@ router.put('/:id/edit', async (req, res) => {
             });
           }
 
-          // Audit price changes
+          // Audit price changes (existing lines keep their stored list price)
           const oldEffective = oldItem.custom_price ?? oldItem.price;
-          const newEffective = newCustomPrice ?? product.price;
+          const newEffective = newCustomPrice ?? oldItem.price;
           if (Math.abs(oldEffective - newEffective) > 0.001) {
             auditLogs.push({
               order_id: order.id,
@@ -994,61 +1013,93 @@ router.put('/:id/edit', async (req, res) => {
       const newOrderItems = [];
       for (const newItem of sortedItems) {
         const product = productCache.get(newItem.product_id);
+        // Lines already on the order keep their stored list price; only newly added products use current pricing
+        const oldItem = oldItemMap.get(newItem.product_id);
+        const listPrice = oldItem ? oldItem.price : (await getProductEffectivePricing(product)).effective_price;
         const customPrice = (newItem.custom_price != null && newItem.custom_price !== '') ? parseFloat(newItem.custom_price) : null;
-        const effectivePrice = customPrice ?? product.price;
+        const effectivePrice = customPrice ?? listPrice;
         newTotal += effectivePrice * newItem.quantity;
         newOrderItems.push({
           order_id: order.id,
           product_id: newItem.product_id,
           requested_qty: newItem.quantity,
           approved_qty: newItem.quantity,
-          price: product.price,
+          price: listPrice,
           custom_price: customPrice
         });
       }
 
       await OrderItem.bulkCreate(newOrderItems, { transaction: t });
 
-      order.total_amount = newTotal;
-      if (wasPending) {
-        order.status = 'approved';
-        order.approved_at = new Date();
+      // ── Keep the invoice consistent with the new total and actual payments ──
+      const paid = invoice
+        ? Math.round((Number(await InvoicePaymentHistory.sum('payment_amount', {
+            where: { invoice_id: invoice.id },
+            transaction: t
+          })) || 0) * 100) / 100
+        : 0;
+      const credited = invoice ? Number(invoice.total_credited_amount) || 0 : 0;
+      if (newTotal < paid + credited - 0.005) {
+        const covered = paid + credited;
+        const err = new Error(credited > 0.005
+          ? `New order total $${newTotal.toFixed(2)} is lower than the $${covered.toFixed(2)} already paid and credited on this invoice.`
+          : `New order total $${newTotal.toFixed(2)} is lower than the $${paid.toFixed(2)} already paid on this invoice. Adjust the payments first.`);
+        err.statusCode = 400;
+        throw err;
       }
-      await order.save({ transaction: t });
+      const invoiceTotals = {
+        final_amount: newTotal,
+        total_paid_amount: paid,
+        ...computeInvoiceBalance(newTotal, paid, credited),
+      };
+      if (invoice) {
+        await invoice.update(invoiceTotals, { transaction: t });
+        invoiceId = invoice.id;
+      } else {
+        const created = await Invoice.create({
+          order_id: order.id,
+          generated_at: new Date(),
+          pdf_url: null,
+          ...invoiceTotals
+        }, { transaction: t });
+        invoiceId = created.id;
+      }
+
+      lockedOrder.total_amount = newTotal;
+      if (wasPending) {
+        lockedOrder.status = 'approved';
+        lockedOrder.approved_at = new Date();
+      }
+      await lockedOrder.save({ transaction: t });
 
       if (auditLogs.length > 0) {
         await OrderEditLog.bulkCreate(auditLogs, { transaction: t });
       }
     });
 
-    // ── Post-transaction: create or regenerate invoice ──────────────────────
+    // ── Post-transaction: regenerate the invoice PDF (totals are already saved) ──
     const updatedOrder = await Order.findByPk(id, {
       include: [{ model: OrderItem, include: [Product] }]
     });
 
-    let invoice = await Invoice.findOne({ where: { order_id: order.id } });
+    let pdfFailed = false;
     if (shop) {
       try {
         const pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
-        if (invoice) {
-          invoice.final_amount = updatedOrder.total_amount;
-          invoice.pdf_url = pdfUrl;
-          invoice.generated_at = new Date();
-          await invoice.save();
-        } else {
-          await Invoice.create({
-            order_id: updatedOrder.id,
-            final_amount: updatedOrder.total_amount,
-            generated_at: new Date(),
-            pdf_url: pdfUrl
-          });
-        }
+        await Invoice.update({ pdf_url: pdfUrl, generated_at: new Date() }, { where: { id: invoiceId } });
       } catch (pdfErr) {
+        pdfFailed = true;
         console.error('Failed to generate/regenerate invoice PDF after order edit:', pdfErr);
       }
     }
 
-    return res.json({ success: true, message: 'Order updated successfully', data: { order: updatedOrder } });
+    return res.json({
+      success: true,
+      message: pdfFailed
+        ? 'Order updated, but the invoice PDF could not be regenerated. Use Regenerate on the invoice to try again.'
+        : 'Order updated successfully',
+      data: { order: updatedOrder, invoice_pdf_failed: pdfFailed }
+    });
   } catch (err) {
     console.error('Error editing order:', err);
     if (err.statusCode) {

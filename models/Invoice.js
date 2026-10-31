@@ -18,6 +18,8 @@ const Invoice = sequelize.define('Invoice', {
     allowNull: false
   },
   total_paid_amount: { type: DataTypes.FLOAT, defaultValue: 0, allowNull: false },
+  // Sum of issued credit notes; balance = final_amount - total_paid_amount - total_credited_amount
+  total_credited_amount: { type: DataTypes.FLOAT, defaultValue: 0, allowNull: false },
   remaining_balance: { type: DataTypes.FLOAT, allowNull: true },
 }, {
   timestamps: false,

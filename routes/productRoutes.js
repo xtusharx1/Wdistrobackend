@@ -10,6 +10,7 @@ const ProductVariationGroup = require('../models/ProductVariationGroup');
 const ProductCollection = require('../models/ProductCollection');
 const Category = require('../models/Category');
 const xlsx = require('xlsx');
+const { getProductEffectivePricing } = require('../services/pricingService');
 
 const router = express.Router();
 
@@ -1103,6 +1104,9 @@ router.get('/', async (req, res) => {
       if (userRole !== 'Admin') {
         delete p.purchase_cost;
       }
+      if (p.ProductCollection && !p.ProductCollection.is_active) {
+        p.deal_price = null;
+      }
       return p;
     });
 
@@ -1140,7 +1144,12 @@ router.get('/scan/:code', async (req, res) => {
     const whereClause = { sku_id: code };
     if (shopId) whereClause.is_active = true; // shop context: active-only
 
-    const product = await Product.findOne({ where: whereClause });
+    const product = await Product.findOne({
+      where: whereClause,
+      include: [
+        { model: ProductCollection, as: 'ProductCollection', attributes: ['id', 'name', 'is_active'] }
+      ]
+    });
     if (!product) {
       return res.status(404).json({ success: false, message: 'No product found for this barcode' });
     }
@@ -1162,6 +1171,12 @@ router.get('/scan/:code', async (req, res) => {
 
     const p = product.toJSON();
     if (userRole !== 'Admin') delete p.purchase_cost;
+    const pricing = await getProductEffectivePricing(product);
+    p.deal_price = pricing.deal_price;
+    p.effective_price = pricing.effective_price;
+    if (pricing.has_deal && pricing.collection_name && (!p.ProductCollection || !p.ProductCollection.name)) {
+      p.ProductCollection = { id: pricing.product_collection_id, name: pricing.collection_name, is_active: true };
+    }
 
     return res.json({ success: true, message: 'Product fetched successfully', data: { product: p } });
   } catch (err) {
@@ -1199,17 +1214,26 @@ router.get('/featured', async (req, res) => {
 
     const products = await Product.findAll({
       where: whereClause,
+      include: [
+        { model: ProductCollection, as: 'ProductCollection', attributes: ['id', 'name', 'is_active'] }
+      ],
       order: [
         ['created_at', 'DESC'],
         ['id', 'DESC'],
       ]
     });
 
-    const sanitized = products.map(p => {
+    const sanitized = await Promise.all(products.map(async p => {
       const j = p.toJSON();
       if (userRole !== 'Admin') delete j.purchase_cost;
+      const pricing = await getProductEffectivePricing(p);
+      j.deal_price = pricing.deal_price;
+      j.effective_price = pricing.effective_price;
+      if (pricing.has_deal && pricing.collection_name && (!j.ProductCollection || !j.ProductCollection.name)) {
+        j.ProductCollection = { id: pricing.product_collection_id, name: pricing.collection_name, is_active: true };
+      }
       return j;
-    });
+    }));
 
     return res.json({ success: true, message: 'Featured products fetched successfully', data: { products: sanitized } });
   } catch (err) {
@@ -1254,6 +1278,13 @@ router.get('/:id', async (req, res) => {
       delete p.purchase_cost;
     }
 
+    const mainPricing = await getProductEffectivePricing(product);
+    p.deal_price = mainPricing.deal_price;
+    p.effective_price = mainPricing.effective_price;
+    if (mainPricing.has_deal && mainPricing.collection_name && (!p.ProductCollection || !p.ProductCollection.name)) {
+      p.ProductCollection = { id: mainPricing.product_collection_id, name: mainPricing.collection_name, is_active: true };
+    }
+
     // Attach variation group members (all other products in the same group)
     const group = await ProductVariationGroup.findOne({
       where: literal(`${parseInt(id)} = ANY("product_ids")`)
@@ -1277,12 +1308,23 @@ router.get('/:id', async (req, res) => {
             }
           }
         }
-        const variantProducts = await Product.findAll({ where: variantWhere });
-        variations = variantProducts.map(vp => {
+        const variantProducts = await Product.findAll({
+          where: variantWhere,
+          include: [
+            { model: ProductCollection, as: 'ProductCollection', attributes: ['id', 'name', 'is_active'] }
+          ]
+        });
+        variations = await Promise.all(variantProducts.map(async vp => {
           const j = vp.toJSON();
           if (userRole !== 'Admin') delete j.purchase_cost;
+          const pricing = await getProductEffectivePricing(vp, product);
+          j.deal_price = pricing.deal_price;
+          j.effective_price = pricing.effective_price;
+          if (pricing.has_deal && pricing.collection_name && (!j.ProductCollection || !j.ProductCollection.name)) {
+            j.ProductCollection = { id: pricing.product_collection_id, name: pricing.collection_name, is_active: true };
+          }
           return j;
-        });
+        }));
       }
     }
 
