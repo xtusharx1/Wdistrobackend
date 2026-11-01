@@ -800,10 +800,11 @@ router.put('/:id/approve', async (req, res) => {
   }
 });
 
-// Edit order before delivery (draft committed atomically)
+// Edit order before delivery (draft committed atomically, supporting Serve Later)
 router.put('/:id/edit', async (req, res) => {
   const { id } = req.params;
-  const { items } = req.body;
+  const { items, create_followup_order, serve_later } = req.body;
+  const shouldServeLater = create_followup_order === true || serve_later === true;
   const userRole = req.headers['x-user-role'];
   const userId = req.headers['x-user-id'];
 
@@ -848,10 +849,10 @@ router.put('/:id/edit', async (req, res) => {
     }
 
     let wasPending = order.status === 'pending';
-    const isApproved = true;
     const parsedUserId = userId ? parseInt(userId) : null;
     const auditLogs = [];
     let invoiceId = null;
+    let followUpOrderId = null;
 
     await sequelize.transaction(async (t) => {
       // Lock the order row and re-check its status so a concurrent "Mark Delivered" can't slip past
@@ -863,7 +864,7 @@ router.put('/:id/edit', async (req, res) => {
       }
       wasPending = lockedOrder.status === 'pending';
 
-      const invoice = await Invoice.findOne({ where: { order_id: order.id }, transaction: t, lock: t.LOCK.UPDATE });
+      const invoice = await Invoice.findOne({ where: { order_id: lockedOrder.id }, transaction: t, lock: t.LOCK.UPDATE });
       if (invoice && invoice.payment_status === 'settled') {
         const err = new Error('This order\'s invoice has been settled and can no longer be edited.');
         err.statusCode = 409;
@@ -872,7 +873,7 @@ router.put('/:id/edit', async (req, res) => {
 
       // Re-fetch order items inside transaction with row locks
       const oldItems = await OrderItem.findAll({
-        where: { order_id: order.id },
+        where: { order_id: lockedOrder.id },
         include: [{ model: Product }],
         transaction: t,
         lock: { level: t.LOCK.UPDATE, of: OrderItem }
@@ -915,30 +916,42 @@ router.put('/:id/edit', async (req, res) => {
         }
       }
 
+      const removedItems = [];
+
       // ── Removed items: restore approved_qty back to stock ──────────────
       for (const oldItem of oldItems) {
         if (!newItemMap.has(oldItem.product_id)) {
           const product = productCache.get(oldItem.product_id);
-          if (product && oldItem.approved_qty > 0) {
+          const oldQty = (wasPending ? oldItem.requested_qty : (oldItem.approved_qty ?? oldItem.requested_qty)) || 0;
+          if (product && oldQty > 0 && !wasPending) {
             const prevStock = product.stock_quantity;
-            product.stock_quantity += oldItem.approved_qty;
+            product.stock_quantity += oldQty;
             await product.save({ transaction: t });
             await StockMovement.create({
               product_id: product.id,
-              quantity_changed: oldItem.approved_qty,
+              quantity_changed: oldQty,
               previous_stock: prevStock,
               new_stock: product.stock_quantity,
-              order_id: order.id,
+              order_id: lockedOrder.id,
               action: 'Edit - Item Removed'
             }, { transaction: t });
           }
+          if (oldQty > 0) {
+            removedItems.push({
+              product_id: oldItem.product_id,
+              name: oldItem.Product?.name || product?.name || `Product #${oldItem.product_id}`,
+              quantity: oldQty,
+              price: oldItem.price,
+              custom_price: oldItem.custom_price,
+            });
+          }
           auditLogs.push({
-            order_id: order.id,
+            order_id: lockedOrder.id,
             user_id: parsedUserId,
             action: 'item_removed',
             product_id: oldItem.product_id,
-            product_name: oldItem.Product?.name || null,
-            previous_value: { quantity: oldItem.approved_qty || oldItem.requested_qty, price: oldItem.custom_price ?? oldItem.price },
+            product_name: oldItem.Product?.name || product?.name || null,
+            previous_value: { quantity: oldQty, price: oldItem.custom_price ?? oldItem.price },
             new_value: null
           });
         }
@@ -965,12 +978,12 @@ router.put('/:id/edit', async (req, res) => {
             quantity_changed: -newItem.quantity,
             previous_stock: prevStock,
             new_stock: product.stock_quantity,
-            order_id: order.id,
+            order_id: lockedOrder.id,
             action: 'Edit - Item Added'
           }, { transaction: t });
           const pricing = await getProductEffectivePricing(product);
           auditLogs.push({
-            order_id: order.id,
+            order_id: lockedOrder.id,
             user_id: parsedUserId,
             action: 'item_added',
             product_id: newItem.product_id,
@@ -980,7 +993,7 @@ router.put('/:id/edit', async (req, res) => {
           });
         } else {
           // Existing product: compute quantity delta
-          const oldQty = oldItem.approved_qty || 0;
+          const oldQty = (wasPending ? oldItem.requested_qty : (oldItem.approved_qty ?? oldItem.requested_qty)) || 0;
           const delta = newItem.quantity - oldQty;
 
           if (delta > 0) {
@@ -997,28 +1010,37 @@ router.put('/:id/edit', async (req, res) => {
               quantity_changed: -delta,
               previous_stock: prevStock,
               new_stock: product.stock_quantity,
-              order_id: order.id,
+              order_id: lockedOrder.id,
               action: 'Edit - Quantity Increased'
             }, { transaction: t });
           } else if (delta < 0) {
             const restore = -delta;
-            const prevStock = product.stock_quantity;
-            product.stock_quantity += restore;
-            await product.save({ transaction: t });
-            await StockMovement.create({
-              product_id: product.id,
-              quantity_changed: restore,
-              previous_stock: prevStock,
-              new_stock: product.stock_quantity,
-              order_id: order.id,
-              action: 'Edit - Quantity Decreased'
-            }, { transaction: t });
+            if (!wasPending) {
+              const prevStock = product.stock_quantity;
+              product.stock_quantity += restore;
+              await product.save({ transaction: t });
+              await StockMovement.create({
+                product_id: product.id,
+                quantity_changed: restore,
+                previous_stock: prevStock,
+                new_stock: product.stock_quantity,
+                order_id: lockedOrder.id,
+                action: 'Edit - Quantity Decreased'
+              }, { transaction: t });
+            }
+            removedItems.push({
+              product_id: oldItem.product_id,
+              name: oldItem.Product?.name || product.name || `Product #${oldItem.product_id}`,
+              quantity: restore,
+              price: oldItem.price,
+              custom_price: newCustomPrice ?? oldItem.custom_price,
+            });
           }
 
           const prevQtyForAudit = wasPending ? oldItem.requested_qty : oldQty;
           if (newItem.quantity !== prevQtyForAudit) {
             auditLogs.push({
-              order_id: order.id,
+              order_id: lockedOrder.id,
               user_id: parsedUserId,
               action: 'quantity_changed',
               product_id: newItem.product_id,
@@ -1033,7 +1055,7 @@ router.put('/:id/edit', async (req, res) => {
           const newEffective = newCustomPrice ?? oldItem.price;
           if (Math.abs(oldEffective - newEffective) > 0.001) {
             auditLogs.push({
-              order_id: order.id,
+              order_id: lockedOrder.id,
               user_id: parsedUserId,
               action: 'price_changed',
               product_id: newItem.product_id,
@@ -1045,8 +1067,45 @@ router.put('/:id/edit', async (req, res) => {
         }
       }
 
+      // ── Optional Serve Later: create manual follow-up order for removed quantities ──
+      if (shouldServeLater && removedItems.length > 0) {
+        const followTotal = removedItems.reduce(
+          (sum, item) => sum + (item.custom_price != null && !isNaN(parseFloat(item.custom_price)) ? parseFloat(item.custom_price) : item.price) * item.quantity,
+          0
+        );
+        const followUp = await Order.create({
+          shop_id: lockedOrder.shop_id,
+          total_amount: followTotal,
+          status: 'pending',
+          source: 'Admin',
+          parent_order_id: lockedOrder.id,
+        }, { transaction: t });
+
+        await OrderItem.bulkCreate(
+          removedItems.map((item) => ({
+            order_id: followUp.id,
+            product_id: item.product_id,
+            requested_qty: item.quantity,
+            approved_qty: null,
+            price: item.price,
+            custom_price: item.custom_price,
+          })),
+          { transaction: t }
+        );
+        followUpOrderId = followUp.id;
+
+        // Annotate audit logs with the created follow-up order id
+        for (const log of auditLogs) {
+          if (log.action === 'item_removed') {
+            log.new_value = { followup_order_id: followUpOrderId, served_later: true };
+          } else if (log.action === 'quantity_changed' && log.new_value) {
+            log.new_value.followup_order_id = followUpOrderId;
+          }
+        }
+      }
+
       // ── Replace all order items atomically ─────────────────────────────
-      await OrderItem.destroy({ where: { order_id: order.id }, transaction: t });
+      await OrderItem.destroy({ where: { order_id: lockedOrder.id }, transaction: t });
 
       let newTotal = 0;
       const sortedItems = [...items].sort((a, b) => {
@@ -1065,10 +1124,10 @@ router.put('/:id/edit', async (req, res) => {
         const effectivePrice = customPrice ?? listPrice;
         newTotal += effectivePrice * newItem.quantity;
         newOrderItems.push({
-          order_id: order.id,
+          order_id: lockedOrder.id,
           product_id: newItem.product_id,
           requested_qty: newItem.quantity,
-          approved_qty: newItem.quantity,
+          approved_qty: wasPending ? null : newItem.quantity,
           price: listPrice,
           custom_price: customPrice
         });
@@ -1076,7 +1135,7 @@ router.put('/:id/edit', async (req, res) => {
 
       await OrderItem.bulkCreate(newOrderItems, { transaction: t });
 
-      // ── Keep the invoice consistent with the new total and actual payments ──
+      // ── Keep the invoice consistent with the new total, preserving payments and credits ──
       const paid = invoice
         ? Math.round((Number(await InvoicePaymentHistory.sum('payment_amount', {
             where: { invoice_id: invoice.id },
@@ -1084,14 +1143,6 @@ router.put('/:id/edit', async (req, res) => {
           })) || 0) * 100) / 100
         : 0;
       const credited = invoice ? Number(invoice.total_credited_amount) || 0 : 0;
-      if (newTotal < paid + credited - 0.005) {
-        const covered = paid + credited;
-        const err = new Error(credited > 0.005
-          ? `New order total $${newTotal.toFixed(2)} is lower than the $${covered.toFixed(2)} already paid and credited on this invoice.`
-          : `New order total $${newTotal.toFixed(2)} is lower than the $${paid.toFixed(2)} already paid on this invoice. Adjust the payments first.`);
-        err.statusCode = 400;
-        throw err;
-      }
       const invoiceTotals = {
         final_amount: newTotal,
         total_paid_amount: paid,
@@ -1100,9 +1151,9 @@ router.put('/:id/edit', async (req, res) => {
       if (invoice) {
         await invoice.update(invoiceTotals, { transaction: t });
         invoiceId = invoice.id;
-      } else {
+      } else if (!wasPending) {
         const created = await Invoice.create({
-          order_id: order.id,
+          order_id: lockedOrder.id,
           generated_at: new Date(),
           pdf_url: null,
           ...invoiceTotals
@@ -1112,8 +1163,8 @@ router.put('/:id/edit', async (req, res) => {
 
       lockedOrder.total_amount = newTotal;
       if (wasPending) {
-        lockedOrder.status = 'approved';
-        lockedOrder.approved_at = new Date();
+        // If it was pending, keep it pending so it can be approved through normal workflow
+        lockedOrder.status = 'pending';
       }
       await lockedOrder.save({ transaction: t });
 
@@ -1128,7 +1179,7 @@ router.put('/:id/edit', async (req, res) => {
     });
 
     let pdfFailed = false;
-    if (shop) {
+    if (shop && invoiceId) {
       try {
         const pdfUrl = await uploadInvoicePDF(updatedOrder, shop);
         await Invoice.update({ pdf_url: pdfUrl, generated_at: new Date() }, { where: { id: invoiceId } });
@@ -1140,10 +1191,16 @@ router.put('/:id/edit', async (req, res) => {
 
     return res.json({
       success: true,
-      message: pdfFailed
-        ? 'Order updated, but the invoice PDF could not be regenerated. Use Regenerate on the invoice to try again.'
-        : 'Order updated successfully',
-      data: { order: updatedOrder, invoice_pdf_failed: pdfFailed }
+      message: followUpOrderId
+        ? `Order updated. Follow-up order WS-${followUpOrderId} created for removed quantities.`
+        : (pdfFailed
+          ? 'Order updated, but the invoice PDF could not be regenerated. Use Regenerate on the invoice to try again.'
+          : 'Order updated successfully'),
+      data: {
+        order: updatedOrder,
+        followup_order_id: followUpOrderId,
+        invoice_pdf_failed: pdfFailed
+      }
     });
   } catch (err) {
     console.error('Error editing order:', err);
