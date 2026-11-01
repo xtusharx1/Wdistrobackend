@@ -10,8 +10,8 @@ const DraftOrder = sequelize.define('DraftOrder', {
     allowNull: false
   },
   total_amount: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
-  // Human-readable name or note to identify the draft when the list is restored
-  notes: { type: DataTypes.STRING(500), allowNull: true },
+  // The shop's live cart, mirrored by the app so it survives restarts (at most one per shop)
+  is_cart: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 }, {
   timestamps: true,
   createdAt: 'created_at',

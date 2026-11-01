@@ -11,38 +11,8 @@ const { getProductEffectivePricing } = require('../services/pricingService');
 const router = express.Router();
 
 // Identity model: the store app signs in as a shop and identifies itself with x-shop-id; it has no
-// individual user accounts. Drafts therefore belong to the shop, and every store query is scoped to it.
-// Admin/Seller (the same roles that may set custom prices on orders) identify themselves with x-user-role.
-const STAFF_ROLES = ['Admin', 'Seller'];
-
-// Who is calling? A request carrying x-shop-id is ALWAYS a store, whatever role header it also sends, so a
-// store can't pass as staff by adding x-user-role. Staff = Admin/Seller role and no shop header.
-const resolveCaller = (req) => {
-  const raw = req.headers['x-shop-id'];
-  if (raw !== undefined && raw !== '') {
-    const shopId = parseInt(raw, 10);
-    return Number.isInteger(shopId) && shopId > 0 ? { type: 'store', shopId } : null;
-  }
-  if (STAFF_ROLES.includes(req.headers['x-user-role'])) return { type: 'staff' };
-  return null;
-};
-const unauthorized = (res) => res.status(401).json({ success: false, message: 'Unauthorized: shop or staff credentials required' });
-
-// Custom price is controlled by Admin/Seller. Per item: { provided: false } (key absent), or
-// { provided: true, value } where value is a positive price, or null to clear it (null / '' / 0, matching how
-// drafts always treated "no custom price"). Stores never provide one: whatever they send is ignored.
-const parseItemPrices = (caller, items) => {
-  const out = [];
-  for (let i = 0; i < items.length; i++) {
-    if (caller.type !== 'staff' || items[i].custom_price === undefined) { out.push({ provided: false }); continue; }
-    const raw = items[i].custom_price;
-    if (raw === null || raw === '') { out.push({ provided: true, value: null }); continue; }
-    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
-    if (!Number.isFinite(n) || n < 0) return { error: `Item ${i + 1}: custom_price must be a positive number (or null to clear it)` };
-    out.push({ provided: true, value: n > 0 ? n : null });
-  }
-  return { values: out };
-};
+// individual user accounts. Drafts therefore belong to the shop, and every query is scoped to it.
+// Drafts are a store feature: there is no staff access and no custom pricing here.
 
 const requireShop = (req, res) => {
   const shopId = parseInt(req.headers['x-shop-id'], 10);
@@ -109,62 +79,123 @@ const buildProductMaps = async (shop, items) => {
 
 const calcTotal = (items, pricingMap) =>
   items.reduce((sum, item) => {
-    const pricing = pricingMap[item.product_id];
-    const price = (item.custom_price != null && item.custom_price > 0) ? item.custom_price : pricing.effective_price;
-    return sum + price * item.quantity;
+    return sum + pricingMap[item.product_id].effective_price * item.quantity;
   }, 0);
 
-// ── POST /drafts — create a new draft ──────────────────────────────────────
-// Store: creates a draft for its own shop. Staff (Admin/Seller): must pass shop_id and may set custom_price.
-router.post('/', async (req, res) => {
-  const caller = resolveCaller(req);
-  if (!caller) return unauthorized(res);
-  const shopId = caller.type === 'store' ? caller.shopId : parseInt(req.body?.shop_id, 10);
-  if (!Number.isInteger(shopId) || shopId <= 0) return res.status(400).json({ success: false, message: 'shop_id is required' });
+// Replace a draft's items and total under the draft's row lock (the same lock submit and delete take), so an
+// edit can't interleave with a submit of the same draft.
+const replaceItems = async (draftId, items, pricingMap, t) => {
+  const total = calcTotal(items, pricingMap);
+  await DraftOrderItem.destroy({ where: { draft_order_id: draftId }, transaction: t });
+  await DraftOrderItem.bulkCreate(
+    items.map(item => ({
+      draft_order_id: draftId,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      price_at_save: pricingMap[item.product_id].effective_price,
+    })),
+    { transaction: t }
+  );
+  await DraftOrder.update({ total_amount: total }, { where: { id: draftId }, transaction: t });
+};
 
-  const { items, notes } = req.body;
+// ── The store's saved cart ─────────────────────────────────────────────────
+// One draft per shop is flagged is_cart. The app mirrors its live cart into it and reloads it on start / login,
+// so a cart survives closing the app. It is an ordinary draft otherwise (submit and delete work on it), but it
+// is left out of the "Saved Drafts" list.
+
+// GET /drafts/cart — the shop's saved cart, or null
+router.get('/cart', async (req, res) => {
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
+  try {
+    const cart = await DraftOrder.findOne({ where: { shop_id: shopId, is_cart: true }, include: DRAFT_INCLUDE });
+    return res.json({ success: true, data: { cart } });
+  } catch (err) {
+    console.error('Get cart error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch cart' });
+  }
+});
+
+// PUT /drafts/cart — replace the saved cart with these items; an empty list clears it
+router.put('/cart', async (req, res) => {
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
+  const { items } = req.body;
+
+  try {
+    if (Array.isArray(items) && items.length === 0) {
+      await clearCart(shopId);
+      return res.json({ success: true, data: { cart: null } });
+    }
+    const itemsError = validateItems(items);
+    if (itemsError) return res.status(400).json({ success: false, message: itemsError });
+
+    const shop = await Shop.findByPk(shopId);
+    if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
+    const result = await buildProductMaps(shop, items);
+    if (result.error) return res.status(400).json({ success: false, message: result.error });
+
+    const cartId = await sequelize.transaction(async (t) => {
+      // Serialise this shop's cart writes so two first saves can't create two carts
+      await Shop.findOne({ where: { id: shopId }, transaction: t, lock: t.LOCK.UPDATE });
+      let cart = await DraftOrder.findOne({ where: { shop_id: shopId, is_cart: true }, transaction: t, lock: t.LOCK.UPDATE });
+      if (!cart) cart = await DraftOrder.create({ shop_id: shopId, is_cart: true, total_amount: 0 }, { transaction: t });
+      await replaceItems(cart.id, items, result.pricingMap, t);
+      return cart.id;
+    });
+
+    const cart = await DraftOrder.findByPk(cartId, { include: DRAFT_INCLUDE });
+    return res.json({ success: true, data: { cart } });
+  } catch (err) {
+    console.error('Save cart error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save cart' });
+  }
+});
+
+const clearCart = (shopId) => sequelize.transaction(async (t) => {
+  const cart = await DraftOrder.findOne({ where: { shop_id: shopId, is_cart: true }, transaction: t, lock: t.LOCK.UPDATE });
+  if (!cart) return;
+  await DraftOrderItem.destroy({ where: { draft_order_id: cart.id }, transaction: t });
+  await DraftOrder.destroy({ where: { id: cart.id }, transaction: t });
+});
+
+// DELETE /drafts/cart — clear the saved cart
+router.delete('/cart', async (req, res) => {
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
+  try {
+    await clearCart(shopId);
+    return res.json({ success: true, message: 'Cart cleared' });
+  } catch (err) {
+    console.error('Clear cart error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to clear cart' });
+  }
+});
+
+// ── POST /drafts — save a new draft for the shop ───────────────────────────
+router.post('/', async (req, res) => {
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
+
+  const { items } = req.body;
   const itemsError = validateItems(items);
   if (itemsError) return res.status(400).json({ success: false, message: itemsError });
-
-  if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 500)) {
-    return res.status(400).json({ success: false, message: 'Notes must be 500 characters or fewer' });
-  }
-  const prices = parseItemPrices(caller, items);
-  if (prices.error) return res.status(400).json({ success: false, message: prices.error });
-  // A new draft starts with no custom prices; only staff-provided ones apply
-  const priced = items.map((item, i) => ({ ...item, custom_price: prices.values[i].provided ? prices.values[i].value : null }));
 
   try {
     const shop = await Shop.findByPk(shopId);
     if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
 
-    const result = await buildProductMaps(shop, priced);
+    const result = await buildProductMaps(shop, items);
     if (result.error) return res.status(400).json({ success: false, message: result.error });
-    const { pricingMap } = result;
 
-    const total = calcTotal(priced, pricingMap);
-
-    const draft = await sequelize.transaction(async (t) => {
-      const d = await DraftOrder.create({
-        shop_id: shopId,
-        total_amount: total,
-        notes: notes ? notes.trim() || null : null,
-      }, { transaction: t });
-
-      await DraftOrderItem.bulkCreate(
-        priced.map(item => ({
-          draft_order_id: d.id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          price_at_save: pricingMap[item.product_id].effective_price,
-          custom_price: item.custom_price,
-        })),
-        { transaction: t }
-      );
-      return d;
+    const draftId = await sequelize.transaction(async (t) => {
+      const d = await DraftOrder.create({ shop_id: shopId, total_amount: 0 }, { transaction: t });
+      await replaceItems(d.id, items, result.pricingMap, t);
+      return d.id;
     });
 
-    const fullDraft = await DraftOrder.findByPk(draft.id, { include: DRAFT_INCLUDE });
+    const fullDraft = await DraftOrder.findByPk(draftId, { include: DRAFT_INCLUDE });
     return res.status(201).json({ success: true, data: { draft: fullDraft } });
   } catch (err) {
     console.error('Create draft error:', err);
@@ -172,16 +203,14 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ── GET /drafts — list drafts: a store sees its own; staff pass ?shop_id= ──
+// ── GET /drafts — the shop's saved drafts (not the live cart) ──────────────
 router.get('/', async (req, res) => {
-  const caller = resolveCaller(req);
-  if (!caller) return unauthorized(res);
-  const shopId = caller.type === 'store' ? caller.shopId : parseInt(req.query.shop_id, 10);
-  if (!Number.isInteger(shopId) || shopId <= 0) return res.status(400).json({ success: false, message: 'shop_id is required' });
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
 
   try {
     const drafts = await DraftOrder.findAll({
-      where: { shop_id: shopId },
+      where: { shop_id: shopId, is_cart: false },
       include: DRAFT_INCLUDE,
       order: [['updated_at', 'DESC']],
     });
@@ -192,14 +221,13 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ── GET /drafts/:id — a store gets its own draft; staff can read any ──
+// ── GET /drafts/:id — one of the shop's drafts ──
 router.get('/:id', async (req, res) => {
-  const caller = resolveCaller(req);
-  if (!caller) return unauthorized(res);
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
 
   try {
-    const where = caller.type === 'store' ? { id: req.params.id, shop_id: caller.shopId } : { id: req.params.id };
-    const draft = await DraftOrder.findOne({ where, include: DRAFT_INCLUDE });
+    const draft = await DraftOrder.findOne({ where: { id: req.params.id, shop_id: shopId }, include: DRAFT_INCLUDE });
     if (!draft) return res.status(404).json({ success: false, message: 'Draft not found' });
     return res.json({ success: true, data: { draft } });
   } catch (err) {
@@ -209,63 +237,28 @@ router.get('/:id', async (req, res) => {
 });
 
 // ── PUT /drafts/:id — replace all items and recalculate total ──
-// Custom prices already on the draft survive every edit. Only staff can change them (set a price, or null/0 to
-// clear it); omitting custom_price keeps the current one. Whatever a store sends is ignored.
 router.put('/:id', async (req, res) => {
-  const caller = resolveCaller(req);
-  if (!caller) return unauthorized(res);
+  const shopId = requireShop(req, res);
+  if (!shopId) return;
 
-  const { items, notes } = req.body;
+  const { items } = req.body;
   const itemsError = validateItems(items);
   if (itemsError) return res.status(400).json({ success: false, message: itemsError });
 
-  if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 500)) {
-    return res.status(400).json({ success: false, message: 'Notes must be 500 characters or fewer' });
-  }
-  const prices = parseItemPrices(caller, items);
-  if (prices.error) return res.status(400).json({ success: false, message: prices.error });
-
   try {
-    const scope = caller.type === 'store' ? { id: req.params.id, shop_id: caller.shopId } : { id: req.params.id };
-    const exists = await DraftOrder.findOne({ where: scope, attributes: ['id', 'shop_id'] });
+    const exists = await DraftOrder.findOne({ where: { id: req.params.id, shop_id: shopId }, attributes: ['id'] });
     if (!exists) return res.status(404).json({ success: false, message: 'Draft not found' });
 
-    const shop = await Shop.findByPk(exists.shop_id);
+    const shop = await Shop.findByPk(shopId);
     if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
 
-    // Only product existence/availability and list prices are needed here; custom prices are resolved
-    // under the row lock below so a concurrent price change can't be overwritten.
     const result = await buildProductMaps(shop, items);
     if (result.error) return res.status(400).json({ success: false, message: result.error });
-    const { pricingMap } = result;
 
     await sequelize.transaction(async (t) => {
-      // Same row lock as submit, so an edit can't interleave with a submit of the same draft
-      const draft = await DraftOrder.findOne({ where: { id: exists.id }, transaction: t, lock: t.LOCK.UPDATE });
+      const draft = await DraftOrder.findOne({ where: { id: exists.id, shop_id: shopId }, transaction: t, lock: t.LOCK.UPDATE });
       if (!draft) throw new HttpError(409, { message: 'This draft was submitted or deleted while you were editing it.' });
-
-      const current = await DraftOrderItem.findAll({ where: { draft_order_id: draft.id }, transaction: t });
-      const currentPrice = new Map(current.map((i) => [i.product_id, i.custom_price]));
-      const priced = items.map((item, i) => ({
-        ...item,
-        custom_price: prices.values[i].provided ? prices.values[i].value : (currentPrice.get(item.product_id) ?? null),
-      }));
-      const total = calcTotal(priced, pricingMap);
-
-      await DraftOrderItem.destroy({ where: { draft_order_id: draft.id }, transaction: t });
-      await DraftOrderItem.bulkCreate(
-        priced.map(item => ({
-          draft_order_id: draft.id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          price_at_save: pricingMap[item.product_id].effective_price,
-          custom_price: item.custom_price,
-        })),
-        { transaction: t }
-      );
-      const updateFields = { total_amount: total };
-      if (notes !== undefined) updateFields.notes = notes ? notes.trim() || null : null;
-      await draft.update(updateFields, { transaction: t });
+      await replaceItems(draft.id, items, result.pricingMap, t);
     });
 
     const fullDraft = await DraftOrder.findOne({ where: { id: exists.id }, include: DRAFT_INCLUDE });
@@ -314,7 +307,7 @@ router.delete('/:id', async (req, res) => {
 //      is created and the draft is left exactly as it was, ready to fix and retry.
 // A retry after a successful submit finds no draft and gets 404 ("may have already been submitted").
 const itemsSignature = (items) =>
-  items.map((i) => `${i.id}:${i.product_id}:${i.quantity}:${i.custom_price ?? ''}`).sort().join('|');
+  items.map((i) => `${i.id}:${i.product_id}:${i.quantity}`).sort().join('|');
 
 router.post('/:id/submit', async (req, res) => {
   const shopId = requireShop(req, res);
@@ -363,8 +356,7 @@ router.post('/:id/submit', async (req, res) => {
       pricingMap[item.product_id] = await getProductEffectivePricing(item.Product);
     }
     const total = draftItems.reduce((sum, item) => {
-      const price = (item.custom_price != null && item.custom_price > 0) ? item.custom_price : pricingMap[item.product_id].effective_price;
-      return sum + price * item.quantity;
+      return sum + pricingMap[item.product_id].effective_price * item.quantity;
     }, 0);
     const validatedSignature = itemsSignature(draftItems);
 
@@ -391,7 +383,6 @@ router.post('/:id/submit', async (req, res) => {
           requested_qty: item.quantity,
           approved_qty: null,
           price: pricingMap[item.product_id].effective_price,
-          custom_price: (item.custom_price != null && item.custom_price > 0) ? item.custom_price : null,
         })),
         { transaction: t }
       );

@@ -109,8 +109,8 @@ if (require.main === module) {
       .then(() => sequelize.query('ALTER TABLE "CreditNotes" ADD COLUMN IF NOT EXISTS used_amount DOUBLE PRECISION').catch(() => {}))
       .then(() => sequelize.query('ALTER TABLE "OrderReturns" ADD COLUMN IF NOT EXISTS restock_inventory BOOLEAN NOT NULL DEFAULT false').catch(() => {}))
       .then(() => sequelize.query('ALTER TABLE "OrderReturns" ADD COLUMN IF NOT EXISTS restocked_at TIMESTAMPTZ').catch(() => {}))
-      // Task 14: draft notes (drafts belong to the shop; there is no per-user ownership)
-      .then(() => sequelize.query("ALTER TABLE \"DraftOrders\" ADD COLUMN IF NOT EXISTS notes VARCHAR(500)").catch(() => {}))
+      // Task 14: the shop's saved cart is a flagged draft
+      .then(() => sequelize.query("ALTER TABLE \"DraftOrders\" ADD COLUMN IF NOT EXISTS is_cart BOOLEAN NOT NULL DEFAULT false").catch(() => {}))
       // Task 15: Inventory receiving vendor metadata + duplicate prevention
       .then(() => sequelize.query("ALTER TABLE \"InventoryReceipts\" ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(255)").catch(() => {}))
       .then(() => sequelize.query("ALTER TABLE \"InventoryReceipts\" ADD COLUMN IF NOT EXISTS vendor_invoice_number VARCHAR(255)").catch(() => {}))
