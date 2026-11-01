@@ -385,10 +385,22 @@ router.patch('/:id/process', async (req, res) => {
     let followUpOrderId = null;
 
     await sequelize.transaction(async (t) => {
+      const lockedOrder = await Order.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!lockedOrder) {
+        const err = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (lockedOrder.status !== 'pending') {
+        const err = new Error(`Cannot process order in ${lockedOrder.status} status`);
+        err.statusCode = 400;
+        throw err;
+      }
+
       // Update each order item
       for (const updateItem of items) {
         const orderItem = await OrderItem.findOne({ 
-          where: { id: updateItem.id, order_id: order.id },
+          where: { id: updateItem.id, order_id: lockedOrder.id },
           transaction: t
         });
         
@@ -428,7 +440,7 @@ router.patch('/:id/process', async (req, res) => {
             quantity_changed: -updateItem.approved_qty,
             previous_stock: prevStock,
             new_stock: product.stock_quantity,
-            order_id: order.id,
+            order_id: lockedOrder.id,
             action: 'Approval'
           }, { transaction: t });
 
@@ -441,26 +453,26 @@ router.patch('/:id/process', async (req, res) => {
         }
       }
 
-      order.total_amount = recalculatedTotal;
-      order.status = 'approved';
-      order.approved_at = new Date();
-      await order.save({ transaction: t });
+      lockedOrder.total_amount = recalculatedTotal;
+      lockedOrder.status = 'approved';
+      lockedOrder.approved_at = new Date();
+      await lockedOrder.save({ transaction: t });
 
       // Optional follow-up order for the quantities that couldn't be approved now (user's choice only)
       if (create_followup_order === true) {
-        const existing = await Order.findOne({ where: { parent_order_id: order.id }, transaction: t });
-        const itemRows = await OrderItem.findAll({ where: { order_id: order.id }, transaction: t });
+        const existing = await Order.findOne({ where: { parent_order_id: lockedOrder.id }, transaction: t, lock: t.LOCK.UPDATE });
+        const itemRows = await OrderItem.findAll({ where: { order_id: lockedOrder.id }, transaction: t });
         const shortfall = itemRows
           .map((it) => ({ it, qty: Math.max(0, (it.requested_qty || 0) - (it.approved_qty || 0)) }))
           .filter((x) => x.qty > 0);
         if (!existing && shortfall.length > 0) {
           const followTotal = shortfall.reduce((sum, { it, qty }) => sum + (it.custom_price ?? it.price) * qty, 0);
           const followUp = await Order.create({
-            shop_id: order.shop_id,
+            shop_id: lockedOrder.shop_id,
             total_amount: followTotal,
             status: 'pending',
             source: 'Admin',
-            parent_order_id: order.id,
+            parent_order_id: lockedOrder.id,
           }, { transaction: t });
           await OrderItem.bulkCreate(shortfall.map(({ it, qty }) => ({
             order_id: followUp.id,

@@ -42,8 +42,12 @@ const INVOICE_BALANCES_SQL = `
 const STORE_BALANCES_SQL = `${INVOICE_BALANCES_SQL}
   , inv_totals AS (
     SELECT shop_id,
-           SUM(total) AS total_invoiced, SUM(paid) AS total_payments, SUM(credited) AS credits_on_invoices,
-           SUM(outstanding) AS receivable, SUM(overpaid) AS overpaid,
+           SUM(total) AS total_invoiced,
+           SUM(paid) AS total_payments,
+           SUM(GREATEST(0, ROUND(paid - overpaid, 2))) AS payments_applied,
+           SUM(credited) AS credits_on_invoices,
+           SUM(outstanding) AS receivable,
+           SUM(overpaid) AS overpaid,
            COUNT(*)::int AS invoice_count,
            COUNT(*) FILTER (WHERE status <> 'paid')::int AS open_invoice_count
     FROM tagged GROUP BY shop_id
@@ -62,13 +66,19 @@ const STORE_BALANCES_SQL = `${INVOICE_BALANCES_SQL}
     GROUP BY o.shop_id
   )
   SELECT COALESCE(t.shop_id, cn.shop_id) AS shop_id,
-         COALESCE(t.total_invoiced, 0) AS total_invoiced, COALESCE(t.total_payments, 0) AS total_payments,
+         COALESCE(t.total_invoiced, 0) AS total_invoiced,
+         COALESCE(t.total_payments, 0) AS total_payments,
+         COALESCE(t.payments_applied, 0) AS payments_applied,
          COALESCE(t.credits_on_invoices, 0) AS credits_on_invoices,
-         COALESCE(t.receivable, 0) AS receivable, COALESCE(t.overpaid, 0) AS overpaid,
-         COALESCE(t.invoice_count, 0) AS invoice_count, COALESCE(t.open_invoice_count, 0) AS open_invoice_count,
-         COALESCE(cn.credits_issued, 0) AS credits_issued, COALESCE(cn.credits_applied, 0) AS credits_applied,
+         COALESCE(t.receivable, 0) AS receivable,
+         COALESCE(t.overpaid, 0) AS overpaid,
+         COALESCE(t.invoice_count, 0) AS invoice_count,
+         COALESCE(t.open_invoice_count, 0) AS open_invoice_count,
+         COALESCE(cn.credits_issued, 0) AS credits_issued,
+         COALESCE(cn.credits_applied, 0) AS credits_applied,
          COALESCE(cn.unused_credit, 0) AS unused_credit,
-         COALESCE(cn.credit_note_count, 0) AS credit_note_count, COALESCE(cn.open_credit_note_count, 0) AS open_credit_note_count
+         COALESCE(cn.credit_note_count, 0) AS credit_note_count,
+         COALESCE(cn.open_credit_note_count, 0) AS open_credit_note_count
   FROM inv_totals t
   FULL OUTER JOIN cn ON cn.shop_id = t.shop_id`;
 
@@ -78,10 +88,13 @@ const toBalance = (r, shopId) => {
   const overpaid = round2(r?.overpaid);
   const payable = round2(unusedCredit + overpaid);
   const net = round2(receivable - payable);
+  const totalPayments = round2(r?.total_payments);
+  const paymentsApplied = round2(r?.payments_applied ?? Math.max(0, round2(totalPayments - overpaid)));
   return {
     shop_id: Number(r?.shop_id ?? shopId),
     total_invoiced: round2(r?.total_invoiced),
-    total_payments: round2(r?.total_payments),
+    total_payments: totalPayments,
+    payments_applied: paymentsApplied,
     total_credits_issued: round2(r?.credits_issued),
     total_credits_applied: round2(r?.credits_applied),
     available_credit: unusedCredit,

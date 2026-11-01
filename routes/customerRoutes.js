@@ -138,6 +138,7 @@ router.get('/:customerId/payment-history', async (req, res) => {
         summary: {
           total_invoiced: balance.total_invoiced,
           total_payments: balance.total_payments,
+          payments_applied: balance.payments_applied,
           total_credits_applied: balance.total_credits_applied,
           outstanding_balance: balance.receivable,
           available_credit: balance.available_credit,
