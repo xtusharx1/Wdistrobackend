@@ -13,6 +13,9 @@ const InvoicePaymentHistory = require('../models/InvoicePaymentHistory');
 const User = require('../models/User');
 const { getProductEffectivePricing } = require('../services/pricingService');
 const { computeInvoiceBalance } = require('../services/invoiceBalanceService');
+const OrderReturn = require('../models/OrderReturn');
+const CreditNote = require('../models/CreditNote');
+const CreditNoteApplication = require('../models/CreditNoteApplication');
 
 const router = express.Router();
 
@@ -119,6 +122,9 @@ router.post('/', async (req, res) => {
       if (!product) {
         return res.status(404).json({ success: false, message: `Product with ID ${item.product_id} not found` });
       }
+      if (product.is_active === false) {
+        return res.status(400).json({ success: false, message: `"${product.name}" is inactive and can't be added to a new order.` });
+      }
 
       // License restrictions
       if (!isAdminOrSeller) {
@@ -190,9 +196,6 @@ router.post('/', async (req, res) => {
           const lockedProduct = await Product.findByPk(product.id, { transaction: t, lock: t.LOCK.UPDATE });
           const prevStock = lockedProduct.stock_quantity;
           lockedProduct.stock_quantity -= requested_qty;
-          if (lockedProduct.stock_quantity === 0) {
-            lockedProduct.is_active = false;
-          }
           await lockedProduct.save({ transaction: t });
 
           await StockMovement.create({
@@ -347,7 +350,7 @@ router.get('/:id', async (req, res) => {
 // Process order (update approved quantities and recalculate total)
 router.patch('/:id/process', async (req, res) => {
   const { id } = req.params;
-  const { items } = req.body; // Array of { id: order_item_id, approved_qty: number }
+  const { items, create_followup_order } = req.body; // items: [{ id: order_item_id, approved_qty, custom_price }]
 
   if (!items || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'items array is required to process order' });
@@ -379,6 +382,7 @@ router.patch('/:id/process', async (req, res) => {
     }
 
     let recalculatedTotal = 0;
+    let followUpOrderId = null;
 
     await sequelize.transaction(async (t) => {
       // Update each order item
@@ -416,9 +420,6 @@ router.patch('/:id/process', async (req, res) => {
 
           const prevStock = product.stock_quantity;
           product.stock_quantity -= updateItem.approved_qty;
-          if (product.stock_quantity === 0) {
-            product.is_active = false;
-          }
           await product.save({ transaction: t });
 
           // Log StockMovement
@@ -444,6 +445,36 @@ router.patch('/:id/process', async (req, res) => {
       order.status = 'approved';
       order.approved_at = new Date();
       await order.save({ transaction: t });
+
+      // Optional follow-up order for the quantities that couldn't be approved now (user's choice only)
+      if (create_followup_order === true) {
+        const existing = await Order.findOne({ where: { parent_order_id: order.id }, transaction: t });
+        const itemRows = await OrderItem.findAll({ where: { order_id: order.id }, transaction: t });
+        const shortfall = itemRows
+          .map((it) => ({ it, qty: Math.max(0, (it.requested_qty || 0) - (it.approved_qty || 0)) }))
+          .filter((x) => x.qty > 0);
+        if (!existing && shortfall.length > 0) {
+          const followTotal = shortfall.reduce((sum, { it, qty }) => sum + (it.custom_price ?? it.price) * qty, 0);
+          const followUp = await Order.create({
+            shop_id: order.shop_id,
+            total_amount: followTotal,
+            status: 'pending',
+            source: 'Admin',
+            parent_order_id: order.id,
+          }, { transaction: t });
+          await OrderItem.bulkCreate(shortfall.map(({ it, qty }) => ({
+            order_id: followUp.id,
+            product_id: it.product_id,
+            requested_qty: qty,
+            approved_qty: null,
+            price: it.price,
+            custom_price: it.custom_price,
+          })), { transaction: t });
+          followUpOrderId = followUp.id;
+        } else if (existing) {
+          followUpOrderId = existing.id;
+        }
+      }
     });
 
     // Fetch the updated order with full details
@@ -470,7 +501,13 @@ router.patch('/:id/process', async (req, res) => {
       });
     }
 
-    return res.json({ success: true, message: 'Order processed successfully', data: { order: updatedOrder } });
+    return res.json({
+      success: true,
+      message: followUpOrderId
+        ? `Order processed. Follow-up order WS-${followUpOrderId} holds the removed quantities.`
+        : 'Order processed successfully',
+      data: { order: updatedOrder, followup_order_id: followUpOrderId }
+    });
   } catch (err) {
     console.error('Error processing order:', err);
     if (err.statusCode === 400 || err.statusCode === 403) {
@@ -529,9 +566,6 @@ router.patch('/:id/status', async (req, res) => {
               if (product) {
                 const prevStock = product.stock_quantity;
                 product.stock_quantity += item.approved_qty;
-                if (product.stock_quantity > 0) {
-                  product.is_active = true;
-                }
                 await product.save({ transaction: t });
 
                 // Log StockMovement
@@ -693,9 +727,6 @@ router.put('/:id/approve', async (req, res) => {
 
           const prevStock = product.stock_quantity;
           product.stock_quantity -= updateItem.approved_qty;
-          if (product.stock_quantity === 0) {
-            product.is_active = false;
-          }
           await product.save({ transaction: t });
 
           // Log StockMovement
@@ -854,6 +885,12 @@ router.put('/:id/edit', async (req, res) => {
           err.statusCode = 404;
           throw err;
         }
+        // Inactive products can stay on lines they're already on, but can't be newly added
+        if (product.is_active === false && !oldItemMap.has(newItem.product_id)) {
+          const err = new Error(`"${product.name}" is inactive and can't be added to this order.`);
+          err.statusCode = 400;
+          throw err;
+        }
         if (product.required_license === 'Seller Permit' && !(shop.seller_permit && shop.approved)) {
           const err = new Error(`Seller Permit Required for "${product.name}".`);
           err.statusCode = 403;
@@ -873,7 +910,6 @@ router.put('/:id/edit', async (req, res) => {
           if (product && oldItem.approved_qty > 0) {
             const prevStock = product.stock_quantity;
             product.stock_quantity += oldItem.approved_qty;
-            if (product.stock_quantity > 0) product.is_active = true;
             await product.save({ transaction: t });
             await StockMovement.create({
               product_id: product.id,
@@ -911,7 +947,6 @@ router.put('/:id/edit', async (req, res) => {
           }
           const prevStock = product.stock_quantity;
           product.stock_quantity -= newItem.quantity;
-          if (product.stock_quantity === 0) product.is_active = false;
           await product.save({ transaction: t });
           await StockMovement.create({
             product_id: product.id,
@@ -944,7 +979,6 @@ router.put('/:id/edit', async (req, res) => {
             }
             const prevStock = product.stock_quantity;
             product.stock_quantity -= delta;
-            if (product.stock_quantity === 0) product.is_active = false;
             await product.save({ transaction: t });
             await StockMovement.create({
               product_id: product.id,
@@ -958,7 +992,6 @@ router.put('/:id/edit', async (req, res) => {
             const restore = -delta;
             const prevStock = product.stock_quantity;
             product.stock_quantity += restore;
-            if (product.stock_quantity > 0) product.is_active = true;
             await product.save({ transaction: t });
             await StockMovement.create({
               product_id: product.id,
@@ -1105,6 +1138,91 @@ router.put('/:id/edit', async (req, res) => {
     if (err.statusCode) {
       return res.status(err.statusCode).json({ success: false, message: err.message });
     }
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// PATCH /orders/:id/store — move an order to a different store (Admin/Seller).
+// The order keeps its ID, items, invoice and payments; balances follow the order's store.
+// Blocked when credit notes are involved, since those are tied to the original store.
+router.patch('/:id/store', async (req, res) => {
+  const { id } = req.params;
+  const userRole = req.headers['x-user-role'];
+  if (req.headers['x-shop-id'] || !['Admin', 'Seller'].includes(userRole)) {
+    return res.status(403).json({ success: false, message: 'Access denied: Only Admin or Seller users can change an order\'s store' });
+  }
+  const shopId = Number(req.body?.shop_id);
+  if (!/^\d+$/.test(String(id)) || !Number.isInteger(shopId) || shopId <= 0) {
+    return res.status(400).json({ success: false, message: 'A valid order ID and shop_id are required' });
+  }
+  const userId = req.headers['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null;
+
+  try {
+    let previousShop;
+    let newShop;
+    await sequelize.transaction(async (t) => {
+      const order = await Order.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!order) { const e = new Error('Order not found'); e.statusCode = 404; throw e; }
+      if (order.shop_id === shopId) { const e = new Error('The order already belongs to this store.'); e.statusCode = 400; throw e; }
+
+      newShop = await Shop.findByPk(shopId, { transaction: t });
+      if (!newShop) { const e = new Error('Store not found'); e.statusCode = 404; throw e; }
+      if (newShop.approval_status !== 'Approved') {
+        const e = new Error(`"${newShop.shop_name}" is not an approved store.`); e.statusCode = 400; throw e;
+      }
+      previousShop = await Shop.findByPk(order.shop_id, { transaction: t });
+
+      const invoice = await Invoice.findOne({ where: { order_id: order.id }, transaction: t, lock: t.LOCK.UPDATE });
+      if (invoice?.payment_status === 'settled') {
+        const e = new Error('This order\'s invoice has been settled; its store can no longer be changed.'); e.statusCode = 409; throw e;
+      }
+      const [returns, creditsIn] = await Promise.all([
+        OrderReturn.count({ where: { order_id: order.id }, transaction: t }),
+        invoice ? CreditNoteApplication.count({ where: { invoice_id: invoice.id }, transaction: t }) : 0,
+      ]);
+      if (returns > 0 || creditsIn > 0) {
+        const e = new Error(returns > 0
+          ? 'This order has returns and credit notes tied to its current store, so its store can\'t be changed.'
+          : 'Credit notes from the current store have been applied to this order\'s invoice, so its store can\'t be changed.');
+        e.statusCode = 409; throw e;
+      }
+
+      order.shop_id = shopId;
+      await order.save({ transaction: t });
+      await OrderEditLog.create({
+        order_id: order.id,
+        user_id: userId,
+        action: 'store_changed',
+        product_id: 0,
+        product_name: null,
+        previous_value: { shop_id: previousShop?.id ?? null, shop_name: previousShop?.shop_name ?? null },
+        new_value: { shop_id: newShop.id, shop_name: newShop.shop_name },
+      }, { transaction: t });
+    });
+
+    // The invoice PDF's "Bill To" names the store, so rebuild it (totals are unaffected)
+    let pdfFailed = false;
+    const invoice = await Invoice.findOne({ where: { order_id: Number(id) } });
+    if (invoice) {
+      try {
+        const fullOrder = await Order.findByPk(id, { include: [{ model: OrderItem, include: [Product] }] });
+        const pdfUrl = await uploadInvoicePDF(fullOrder, newShop);
+        await invoice.update({ pdf_url: pdfUrl });
+      } catch (pdfErr) {
+        pdfFailed = true;
+        console.error('Failed to regenerate invoice PDF after store change:', pdfErr);
+      }
+    }
+    const order = await Order.findByPk(id, { include: [{ model: OrderItem, include: [Product] }, { model: Invoice }] });
+    return res.json({
+      success: true,
+      message: `Order moved from ${previousShop?.shop_name || 'its previous store'} to ${newShop.shop_name}.`
+        + (pdfFailed ? ' The invoice PDF could not be regenerated; use Regenerate on the invoice.' : ''),
+      data: { order, invoice_pdf_failed: pdfFailed }
+    });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
+    console.error('Error changing order store:', err);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

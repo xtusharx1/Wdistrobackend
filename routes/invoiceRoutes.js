@@ -6,7 +6,8 @@ const OrderItem = require('../models/OrderItem');
 const Product = require('../models/Product');
 const Shop = require('../models/Shop');
 const User = require('../models/User');
-const { uploadInvoicePDF } = require('../services/pdfService');
+const { uploadInvoicePDF, generateInvoicePDFBuffer } = require('../services/pdfService');
+const { createZipStream } = require('../services/zipService');
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const PaymentEditLog = require('../models/PaymentEditLog');
 const sequelize = require('../config/db');
@@ -287,6 +288,118 @@ router.patch('/payments/:paymentId', async (req, res) => {
   } catch (err) {
     await t.rollback();
     console.error('Error updating payment:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── POST /invoices/bulk-download — ZIP of invoice PDFs for selected orders (Admin/Seller) ──
+// body: { order_ids: [..] }. The ZIP is streamed: PDFs are fetched a few at a time (stored copy when it can
+// be fetched, otherwise rendered with the normal invoice generator, never rewriting the stored invoice) and
+// each one is written to the response as soon as it is ready, in the order requested. Memory stays at a few
+// PDFs regardless of how many are selected. Anything that can't be included is listed in _summary.txt.
+const BULK_INVOICE_LIMIT = 100;
+const BULK_FETCH_CONCURRENCY = 4;
+const BULK_FETCH_TIMEOUT_MS = 30000;
+const safeName = (s) => String(s || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+
+router.post('/bulk-download', async (req, res) => {
+  if (req.headers['x-shop-id'] || !['Admin', 'Seller'].includes(req.headers['x-user-role'])) {
+    return res.status(403).json({ success: false, message: 'Access denied: Only Admin or Seller users can download invoices in bulk' });
+  }
+  const raw = Array.isArray(req.body?.order_ids) ? req.body.order_ids : null;
+  const orderIds = raw ? [...new Set(raw.map(Number))].filter((n) => Number.isInteger(n) && n > 0) : [];
+  if (!raw || orderIds.length === 0 || orderIds.length !== raw.length) {
+    return res.status(400).json({ success: false, message: 'order_ids must be a non-empty list of distinct order IDs' });
+  }
+  if (orderIds.length > BULK_INVOICE_LIMIT) {
+    return res.status(400).json({ success: false, message: `Select at most ${BULK_INVOICE_LIMIT} invoices per download` });
+  }
+
+  let streaming = false;
+  try {
+    // Light lookup only (order + invoice + store); line items are loaded just for invoices that need rendering
+    const orders = await Order.findAll({ where: { id: orderIds }, include: [{ model: Invoice }, { model: Shop }] });
+    const byId = new Map(orders.map((o) => [o.id, o]));
+    const candidates = [];
+    const notIncluded = [];
+    for (const id of orderIds) {
+      const order = byId.get(id);
+      if (!order) { notIncluded.push(`WS-${id}: order not found`); continue; }
+      if (!order.Invoice) { notIncluded.push(`WS-${id}: no invoice has been generated for this order`); continue; }
+      candidates.push({
+        id,
+        name: `INV-${id}_WS-${id}${order.Shop ? `_${safeName(order.Shop.shop_name)}` : ''}.pdf`,
+        pdfUrl: order.Invoice.pdf_url,
+        shop: order.Shop,
+      });
+    }
+    if (candidates.length === 0) {
+      return res.status(404).json({ success: false, message: 'None of the selected orders have an invoice that could be downloaded.', skipped: notIncluded });
+    }
+
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+    res.status(200);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="invoices-${stamp}.zip"`);
+    res.setHeader('Cache-Control', 'no-store');
+    // Known before streaming starts; failures while building are reported in _summary.txt
+    res.setHeader('X-Invoices-Requested', String(orderIds.length));
+    res.setHeader('X-Invoices-Included', String(candidates.length));
+    res.setHeader('X-Invoices-Skipped', String(notIncluded.length));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Invoices-Requested, X-Invoices-Included, X-Invoices-Skipped');
+    res.flushHeaders();
+    streaming = true;
+
+    let clientGone = false;
+    res.on('close', () => { if (!res.writableFinished) clientGone = true; });
+
+    const loadPdf = async (c) => {
+      if (c.pdfUrl) {
+        try {
+          const r = await fetch(c.pdfUrl, { signal: AbortSignal.timeout(BULK_FETCH_TIMEOUT_MS) });
+          if (r.ok) {
+            const pdf = Buffer.from(await r.arrayBuffer());
+            if (pdf.subarray(0, 5).toString() === '%PDF-') return { name: c.name, data: pdf };
+          }
+        } catch (e) { /* fall back to rendering */ }
+      }
+      try {
+        if (!c.shop) throw new Error('store missing');
+        const full = await Order.findByPk(c.id, { include: [{ model: OrderItem, include: [Product] }] });
+        return { name: c.name, data: await generateInvoicePDFBuffer(full, c.shop), rendered: true };
+      } catch (e) {
+        return { name: c.name, failed: `WS-${c.id}: invoice PDF could not be fetched or generated` };
+      }
+    };
+
+    const zip = createZipStream(res);
+    const pending = new Array(candidates.length);
+    let started = 0;
+    const startNext = () => { if (started < candidates.length) { const i = started++; pending[i] = loadPdf(candidates[i]); } };
+    for (let k = 0; k < BULK_FETCH_CONCURRENCY; k++) startNext();
+
+    let included = 0;
+    let rendered = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      const result = await pending[i];
+      pending[i] = null; // release the PDF as soon as it has been written
+      if (clientGone) return; // stop doing work for a download nobody is receiving
+      if (result.failed) notIncluded.push(result.failed);
+      else { await zip.addFile(result.name, result.data); included++; if (result.rendered) rendered++; }
+      startNext();
+    }
+
+    const summary = [
+      `Invoices downloaded: ${included} of ${orderIds.length}`,
+      rendered ? `Rendered fresh (stored PDF unavailable): ${rendered}` : null,
+      notIncluded.length ? `\nNot included:\n${notIncluded.map((x) => `- ${x}`).join('\n')}` : null,
+      `\nGenerated ${new Date().toISOString()}`,
+    ].filter(Boolean).join('\n');
+    await zip.addFile('_summary.txt', Buffer.from(summary, 'utf8'));
+    await zip.finish();
+  } catch (err) {
+    console.error('Error building invoice ZIP:', err);
+    if (streaming) return res.destroy(err); // truncated archive must look like a failed download, not a finished one
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

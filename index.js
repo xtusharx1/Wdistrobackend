@@ -101,8 +101,24 @@ if (require.main === module) {
         console.log("Note: enum_Orders_status alter error (safe if already exists or non-Postgres):", err.message);
       })
       .then(() => sequelize.query('ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT \'App\'').catch(() => {}))
+      .then(() => sequelize.query(`ALTER TYPE "enum_OrderEditLogs_action" ADD VALUE IF NOT EXISTS 'store_changed'`).catch(() => {}))
+      .then(() => sequelize.query('ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS parent_order_id INTEGER').catch(() => {}))
+      // At most one follow-up order per parent, so retried approvals can't create duplicates
+      .then(() => sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS orders_parent_order_id_unique ON "Orders" (parent_order_id) WHERE parent_order_id IS NOT NULL').catch(() => {}))
       .then(() => sequelize.query('ALTER TABLE "Invoices" ADD COLUMN IF NOT EXISTS total_credited_amount DOUBLE PRECISION NOT NULL DEFAULT 0').catch(() => {}))
       .then(() => sequelize.query('ALTER TABLE "CreditNotes" ADD COLUMN IF NOT EXISTS used_amount DOUBLE PRECISION').catch(() => {}))
+      .then(() => sequelize.query('ALTER TABLE "OrderReturns" ADD COLUMN IF NOT EXISTS restock_inventory BOOLEAN NOT NULL DEFAULT false').catch(() => {}))
+      .then(() => sequelize.query('ALTER TABLE "OrderReturns" ADD COLUMN IF NOT EXISTS restocked_at TIMESTAMPTZ').catch(() => {}))
+      // Task 14: draft notes (drafts belong to the shop; there is no per-user ownership)
+      .then(() => sequelize.query("ALTER TABLE \"DraftOrders\" ADD COLUMN IF NOT EXISTS notes VARCHAR(500)").catch(() => {}))
+      // Task 15: Inventory receiving vendor metadata + duplicate prevention
+      .then(() => sequelize.query("ALTER TABLE \"InventoryReceipts\" ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(255)").catch(() => {}))
+      .then(() => sequelize.query("ALTER TABLE \"InventoryReceipts\" ADD COLUMN IF NOT EXISTS vendor_invoice_number VARCHAR(255)").catch(() => {}))
+      .then(() => sequelize.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS inventory_receipts_vendor_invoice_unique
+        ON "InventoryReceipts" (vendor_name, vendor_invoice_number)
+        WHERE vendor_name IS NOT NULL AND vendor_invoice_number IS NOT NULL
+      `).catch(() => {}))
       // Migrate ShopPermits.permit_type from ENUM to VARCHAR so new permit types
 
       // can be added without a database migration in the future.

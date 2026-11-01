@@ -368,7 +368,7 @@ router.post('/', async (req, res) => {
       sub_category: subCat,
       required_license: reqLicense,
       stock_quantity,
-      is_active: is_active !== undefined ? is_active : (stock_quantity > 0),
+      is_active: is_active !== undefined ? is_active : true,
       image_url,
       sku_id,
       description,
@@ -422,7 +422,7 @@ router.post('/bulk', async (req, res) => {
           sub_category: subCat,
           required_license: reqLicense,
           stock_quantity: p.stock_quantity,
-          is_active: p.is_active !== undefined ? p.is_active : (p.stock_quantity > 0),
+          is_active: p.is_active !== undefined ? p.is_active : true,
           image_url: p.image_url || null,
           description: p.description || null,
           is_clearance: isClearance,
@@ -1418,9 +1418,6 @@ const handleBulkUpdateVariations = async (req, res) => {
         const sq = parseInt(updates.stock_quantity, 10);
         if (!isNaN(sq) && sq >= 0) {
           product.stock_quantity = sq;
-          if (updates.is_active === undefined) {
-            product.is_active = sq > 0;
-          }
         }
       }
 
@@ -1548,9 +1545,6 @@ router.patch('/:id', async (req, res) => {
 
     if (stock_quantity !== undefined) {
       product.stock_quantity = stock_quantity;
-      if (is_active === undefined) {
-        product.is_active = stock_quantity > 0;
-      }
     }
     if (image_url !== undefined) product.image_url = image_url;
     if (description !== undefined) product.description = description;
@@ -1643,7 +1637,6 @@ router.patch('/:id/stock', async (req, res) => {
     }
 
     product.stock_quantity = stock_quantity;
-    product.is_active = stock_quantity > 0;
     await product.save();
     return res.json({ success: true, message: 'Product stock updated successfully', data: { product } });
   } catch (err) {

@@ -190,9 +190,6 @@ router.patch('/:id/bulk-update', async (req, res) => {
         const sq = parseInt(updates.stock_quantity, 10);
         if (!isNaN(sq) && sq >= 0) {
           product.stock_quantity = sq;
-          if (updates.is_active === undefined) {
-            product.is_active = sq > 0;
-          }
         }
       }
 

@@ -21,7 +21,9 @@ const Order = sequelize.define('Order', {
   source: { type: DataTypes.STRING, defaultValue: 'App', allowNull: true },
   approved_at: { type: DataTypes.DATE, allowNull: true },
   dispatched_at: { type: DataTypes.DATE, allowNull: true },
-  delivered_at: { type: DataTypes.DATE, allowNull: true }
+  delivered_at: { type: DataTypes.DATE, allowNull: true },
+  // Follow-up order created for items removed or short during approval of this parent order
+  parent_order_id: { type: DataTypes.INTEGER, allowNull: true }
 }, {
 
   timestamps: true,

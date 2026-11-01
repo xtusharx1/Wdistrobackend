@@ -12,6 +12,7 @@ const OrderReturnItem = require('../models/OrderReturnItem');
 const SalesExecutiveAssignment = require('../models/SalesExecutiveAssignment');
 const { round2 } = require('../services/invoiceBalanceService');
 const { remainingOf, usageStatusOf } = require('../services/creditNoteService');
+const { INVOICE_BALANCES_SQL, getStoreBalance, getAllStoreBalances } = require('../services/storeBalanceService');
 
 const router = express.Router();
 
@@ -26,37 +27,80 @@ const canViewStoreAccount = async (shopId, headers) => {
   return false;
 };
 
-// Per-order (invoice) balances for one store, aggregated in SQL so large accounts stay fast.
-// Outstanding is computed from actual payment rows and credit applications, never stored totals.
-const ORDER_BALANCES_SQL = `
-  WITH inv AS (
-    SELECT i.id AS invoice_id, i.order_id, o.created_at AS order_date, i.pdf_url,
-           i.final_amount::numeric AS total,
-           COALESCE(p.paid, 0)::numeric AS paid,
-           COALESCE(p.n, 0)::int AS payment_count,
-           p.last_paid_at AS last_payment_at,
-           COALESCE(a.credited, 0)::numeric AS credited
-    FROM "Invoices" i
-    JOIN "Orders" o ON o.id = i.order_id
-    LEFT JOIN (
-      SELECT invoice_id, SUM(payment_amount) AS paid, COUNT(*) AS n, MAX(verified_at) AS last_paid_at
-      FROM "InvoicePaymentHistories" GROUP BY invoice_id
-    ) p ON p.invoice_id = i.id
-    LEFT JOIN (
-      SELECT invoice_id, SUM(amount) AS credited FROM "CreditNoteApplications" GROUP BY invoice_id
-    ) a ON a.invoice_id = i.id
-    WHERE o.shop_id = :shopId AND o.status NOT IN ('cancelled', 'rejected')
-  ), calc AS (
-    SELECT *, GREATEST(0, ROUND(total - paid - credited, 2)) AS outstanding FROM inv
-  ), tagged AS (
-    SELECT *, CASE
-      WHEN outstanding <= 0.005 THEN 'paid'
-      WHEN paid + credited > 0.005 THEN 'partially_paid'
-      ELSE 'unpaid' END AS status
-    FROM calc
-  )`;
-
 const STATUS_FILTERS = { all: 'TRUE', unpaid: "status <> 'paid'", paid: "status = 'paid'" };
+
+// ── GET /customers/balances — receivable/payable for every store (Admin/Seller) ──
+router.get('/balances', async (req, res) => {
+  if (req.headers['x-shop-id'] || !['Admin', 'Seller'].includes(req.headers['x-user-role'])) {
+    return res.status(403).json({ success: false, message: 'Access denied' });
+  }
+  try {
+    return res.json({ success: true, data: { balances: await getAllStoreBalances() } });
+  } catch (err) {
+    console.error('Error fetching store balances:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /customers/:customerId/balance — one store's receivable, payable and net position ──
+router.get('/:customerId/balance', async (req, res) => {
+  const { customerId } = req.params;
+  if (!/^\d+$/.test(String(customerId))) return res.status(400).json({ success: false, message: 'Invalid store ID' });
+  try {
+    if (!(await canViewStoreAccount(customerId, req.headers))) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    return res.json({ success: true, data: { balance: await getStoreBalance(customerId) } });
+  } catch (err) {
+    console.error('Error fetching store balance:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ── GET /customers/:customerId/payments-list — the store's payment rows, newest first, paged ──
+router.get('/:customerId/payments-list', async (req, res) => {
+  const { customerId } = req.params;
+  if (!/^\d+$/.test(String(customerId))) return res.status(400).json({ success: false, message: 'Invalid store ID' });
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  try {
+    if (!(await canViewStoreAccount(customerId, req.headers))) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const rows = await sequelize.query(`
+      SELECT p.id, p.verified_at, p.payment_method, p.payment_amount, p.payment_reference_no, p.remarks,
+             i.order_id, u.name AS recorded_by, COUNT(*) OVER()::int AS filtered_total
+      FROM "InvoicePaymentHistories" p
+      JOIN "Invoices" i ON i.id = p.invoice_id
+      JOIN "Orders" o ON o.id = i.order_id
+      LEFT JOIN "Users" u ON u.id = p.verified_by_user_id
+      WHERE o.shop_id = :shopId AND o.status NOT IN ('cancelled', 'rejected')
+      ORDER BY p.verified_at DESC, p.id DESC
+      LIMIT :limit OFFSET :offset`,
+    { replacements: { shopId: Number(customerId), limit, offset: (page - 1) * limit }, type: QueryTypes.SELECT });
+    const total = rows[0]?.filtered_total || 0;
+    return res.json({
+      success: true,
+      data: {
+        payments: rows.map((r) => ({
+          id: r.id,
+          payment_date: r.verified_at,
+          payment_method: r.payment_method,
+          amount: round2(r.payment_amount),
+          reference_no: r.payment_reference_no,
+          remarks: r.remarks,
+          order_number: `WS-${r.order_id}`,
+          invoice_number: `INV-${r.order_id}`,
+          recorded_by: r.recorded_by,
+        })),
+        pagination: { page, limit, total, has_more: page * limit < total },
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching store payments:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
 
 // ── GET /customers/:customerId/payment-history — account summary + paged order-wise balances ──
 // query: status=unpaid|paid|all (default unpaid), search=<order/invoice number>, page (1+), limit (1-50, default 20)
@@ -72,21 +116,19 @@ router.get('/:customerId/payment-history', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const shopId = Number(customerId);
-    const [[totals], rows, notes] = await Promise.all([
-      sequelize.query(`${ORDER_BALANCES_SQL}
-        SELECT COALESCE(SUM(total), 0) AS total_invoiced, COALESCE(SUM(paid), 0) AS total_payments,
-               COALESCE(SUM(credited), 0) AS total_credits, COALESCE(SUM(outstanding), 0) AS outstanding,
-               COUNT(*)::int AS count_all,
+    const [[counts], rows, balance] = await Promise.all([
+      sequelize.query(`${INVOICE_BALANCES_SQL}
+        SELECT COUNT(*)::int AS count_all,
                COUNT(*) FILTER (WHERE status <> 'paid')::int AS count_unpaid,
                COUNT(*) FILTER (WHERE status = 'paid')::int AS count_paid
         FROM tagged`, { replacements: { shopId }, type: QueryTypes.SELECT }),
-      sequelize.query(`${ORDER_BALANCES_SQL}
+      sequelize.query(`${INVOICE_BALANCES_SQL}
         SELECT *, COUNT(*) OVER()::int AS filtered_total FROM tagged
         WHERE ${STATUS_FILTERS[status]} AND (:digits = '' OR order_id::text LIKE :like)
         ORDER BY order_date DESC, invoice_id DESC
         LIMIT :limit OFFSET :offset`,
       { replacements: { shopId, digits, like: `%${digits}%`, limit, offset: (page - 1) * limit }, type: QueryTypes.SELECT }),
-      CreditNote.findAll({ include: [{ model: Order, attributes: [], where: { shop_id: shopId } }] }),
+      getStoreBalance(shopId),
     ]);
 
     const filteredTotal = rows[0]?.filtered_total || 0;
@@ -94,13 +136,13 @@ router.get('/:customerId/payment-history', async (req, res) => {
       success: true,
       data: {
         summary: {
-          total_invoiced: round2(totals.total_invoiced),
-          total_payments: round2(totals.total_payments),
-          total_credits_applied: round2(totals.total_credits),
-          outstanding_balance: round2(totals.outstanding),
-          available_credit: round2(notes.reduce((s, cn) => s + remainingOf(cn), 0)),
+          total_invoiced: balance.total_invoiced,
+          total_payments: balance.total_payments,
+          total_credits_applied: balance.total_credits_applied,
+          outstanding_balance: balance.receivable,
+          available_credit: balance.available_credit,
         },
-        counts: { all: totals.count_all, unpaid: totals.count_unpaid, paid: totals.count_paid },
+        counts: { all: counts.count_all, unpaid: counts.count_unpaid, paid: counts.count_paid },
         orders: rows.map((r) => ({
           invoice_id: r.invoice_id,
           order_id: r.order_id,

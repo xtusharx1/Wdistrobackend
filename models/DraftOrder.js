@@ -10,6 +10,8 @@ const DraftOrder = sequelize.define('DraftOrder', {
     allowNull: false
   },
   total_amount: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
+  // Human-readable name or note to identify the draft when the list is restored
+  notes: { type: DataTypes.STRING(500), allowNull: true },
 }, {
   timestamps: true,
   createdAt: 'created_at',

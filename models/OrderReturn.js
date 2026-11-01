@@ -17,6 +17,9 @@ const OrderReturn = sequelize.define('OrderReturn', {
   created_by_user_id: { type: DataTypes.INTEGER, allowNull: true },
   // Client-generated key so a resubmitted form can't record the same return twice
   request_key: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+  // Admin chose to put the returned quantities back into stock (done once, in the same transaction)
+  restock_inventory: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  restocked_at: { type: DataTypes.DATE, allowNull: true },
 }, {
   timestamps: true,
   createdAt: 'created_at',

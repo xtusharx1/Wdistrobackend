@@ -6,7 +6,7 @@ const OrderEditLog = sequelize.define('OrderEditLog', {
   order_id: { type: DataTypes.INTEGER, allowNull: false },
   user_id: { type: DataTypes.INTEGER, allowNull: true },
   action: {
-    type: DataTypes.ENUM('item_added', 'item_removed', 'quantity_changed', 'price_changed'),
+    type: DataTypes.ENUM('item_added', 'item_removed', 'quantity_changed', 'price_changed', 'store_changed'),
     allowNull: false
   },
   product_id: { type: DataTypes.INTEGER, allowNull: false },

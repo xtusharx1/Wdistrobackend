@@ -171,7 +171,8 @@ const generateInvoicePDFBuffer = (order, shop) => {
     
     doc.fontSize(9).font('Helvetica');
 
-    const sortedItems = [...(order.OrderItems || [])].sort((a, b) => {
+    // Lines removed during approval (approved 0) aren't billed, so they're left off the invoice
+    const sortedItems = [...(order.OrderItems || [])].filter((item) => (item.approved_qty ?? item.requested_qty) > 0).sort((a, b) => {
       const nameA = a.Product?.billing_name || a.Product?.name || `Product #${a.product_id}`;
       const nameB = b.Product?.billing_name || b.Product?.name || `Product #${b.product_id}`;
       return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
@@ -289,4 +290,5 @@ const uploadInvoicePDF = async (order, shop) => {
 
 module.exports = {
   uploadInvoicePDF,
+  generateInvoicePDFBuffer,
 };

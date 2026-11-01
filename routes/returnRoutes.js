@@ -1,7 +1,7 @@
 const express = require('express');
 const {
   Order, OrderItem, Product, Shop, Invoice, User,
-  OrderReturn, OrderReturnItem, CreditNote, SalesExecutiveAssignment,
+  OrderReturn, OrderReturnItem, CreditNote, SalesExecutiveAssignment, StockMovement,
 } = require('../models');
 const sequelize = require('../config/db');
 const { round2 } = require('../services/invoiceBalanceService');
@@ -121,7 +121,7 @@ const generateCreditNotePdf = async (creditNoteId) => {
 };
 
 // ── POST /returns/order/:orderId — record a return and issue its credit note ──
-// body: { items: [{ order_item_id, quantity }], reason?, return_date?, request_key }
+// body: { items: [{ order_item_id, quantity }], reason?, return_date?, request_key, restock_inventory? }
 router.post('/order/:orderId', async (req, res) => {
   const { orderId } = req.params;
   if (!canProcessReturns(req.headers)) {
@@ -131,7 +131,7 @@ router.post('/order/:orderId', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid order ID' });
   }
 
-  const { items, reason, return_date, request_key } = req.body || {};
+  const { items, reason, return_date, request_key, restock_inventory } = req.body || {};
   const errors = {};
   if (typeof request_key !== 'string' || !/^[A-Za-z0-9_-]{8,100}$/.test(request_key)) {
     errors.request_key = 'A request key (8-100 letters, digits, - or _) is required';
@@ -151,6 +151,10 @@ router.post('/order/:orderId', async (req, res) => {
       seen.add(it.order_item_id);
     }
   }
+  if (restock_inventory !== undefined && typeof restock_inventory !== 'boolean') {
+    errors.restock_inventory = 'restock_inventory must be true or false';
+  }
+  const restock = restock_inventory === true;
   if (reason !== undefined && reason !== null && (typeof reason !== 'string' || reason.length > 1000)) {
     errors.reason = 'Reason must be text of 1000 characters or fewer';
   }
@@ -243,8 +247,30 @@ router.post('/order/:orderId', async (req, res) => {
         total_amount: total,
         created_by_user_id: userId,
         request_key,
+        restock_inventory: restock,
+        restocked_at: restock ? new Date() : null,
       }, { transaction: t });
       await OrderReturnItem.bulkCreate(lines.map((l) => ({ ...l, return_id: orderReturn.id })), { transaction: t });
+
+      // Optional restock, inside this transaction so a retried request (same request_key) can't restock twice.
+      // Credit and invoice figures don't depend on it.
+      if (restock) {
+        for (const l of lines) {
+          const product = await Product.findByPk(l.product_id, { transaction: t, lock: t.LOCK.UPDATE });
+          if (!product) continue;
+          const prevStock = product.stock_quantity;
+          product.stock_quantity = prevStock + l.quantity;
+          await product.save({ transaction: t });
+          await StockMovement.create({
+            product_id: product.id,
+            quantity_changed: l.quantity,
+            previous_stock: prevStock,
+            new_stock: product.stock_quantity,
+            order_id: order.id,
+            action: 'Return Restock',
+          }, { transaction: t });
+        }
+      }
 
       const seq = (await CreditNote.count({ where: { order_id: order.id }, transaction: t })) + 1;
       const creditNote = await CreditNote.create({
@@ -295,9 +321,10 @@ router.post('/order/:orderId', async (req, res) => {
   const invoice = await Invoice.findByPk(created.invoice_id, { attributes: INVOICE_ATTRS });
   return res.status(201).json({
     success: true,
-    message: pdfFailed
+    message: (pdfFailed
       ? `Return recorded and credit note ${created.CreditNote.credit_note_number} issued, but its PDF could not be generated. Use Generate PDF to retry.`
-      : `Return recorded and credit note ${created.CreditNote.credit_note_number} issued.`,
+      : `Return recorded and credit note ${created.CreditNote.credit_note_number} issued.`)
+      + (created.restock_inventory ? ' Returned quantities were added back to inventory.' : ' Inventory was not changed.'),
     data: { return: withCreditUsage(created), invoice, pdf_failed: pdfFailed }
   });
 });
